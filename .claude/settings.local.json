@@ -7,7 +7,8 @@
       "Bash(forge:*)",
       "Bash(yarn server:*)",
       "Bash(curl:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(npx webpack:*)"
     ]
   }
 }

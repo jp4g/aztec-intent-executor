@@ -11,6 +11,9 @@ import { AztecToEvmBridge, EvmToAztecBridge } from "./bridge.js";
 import { AZTEC_NODE_URL, EVM_RPC_URL, SPONSORED_FPC_ADDRESS, logConfig } from "./config.js";
 import type { EmbeddedWallet } from "@aztec/wallets/embedded";
 import type { AztecNode } from "@aztec/aztec.js/node";
+import { createPublicClient, createWalletClient, http, parseAbi } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { foundry } from "viem/chains";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,6 +21,15 @@ const __dirname = path.dirname(__filename);
 // Anvil config for fee juice bridging
 const ANVIL_RPC_URL = 'http://localhost:8545';
 const ANVIL_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+
+// Demo EVM account (Anvil account #1)
+const DEMO_EVM_ADDRESS = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+const DEMO_EVM_PRIVATE_KEY = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
+
+const ERC20_ABI = parseAbi([
+  "function balanceOf(address account) external view returns (uint256)",
+  "function transfer(address to, uint256 amount) external returns (bool)",
+]);
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3001;
 const FAUCET_AMOUNT = 1000n * 1000000n; // 1000 USDC with 6 decimals
@@ -391,6 +403,129 @@ app.post("/api/test/transfer-private", async (req, res) => {
   }
 });
 
+// Faucet - mint USDC privately to any address (for frontend demo)
+app.post("/api/faucet/private", async (req, res) => {
+  if (!isInitialized) {
+    return res.status(503).json({ error: "Server is still initializing, please wait..." });
+  }
+
+  try {
+    const { address } = req.body;
+    if (!address) {
+      return res.status(400).json({ error: "Address is required" });
+    }
+
+    const recipient = AztecAddress.fromString(address);
+
+    console.log(`[Faucet] Registering recipient ${address}...`);
+    await wallet.registerSender(recipient, 'faucet-recipient');
+
+    console.log(`[Faucet] Minting 1000 USDC (PRIVATE) to ${address}...`);
+    const { mintTokensPrivate } = await import("./utils.js");
+    await mintTokensPrivate(token, minterAddress, recipient, FAUCET_AMOUNT);
+    console.log(`[Faucet] Private mint complete to ${address}`);
+
+    res.json({
+      success: true,
+      amount: "1000",
+    });
+  } catch (error) {
+    console.error("Error minting tokens:", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: `Failed to mint tokens: ${errorMessage}` });
+  }
+});
+
+// Demo - Get EVM balance of demo account
+app.get("/api/demo/evm-balance", async (_req, res) => {
+  if (!EVM_TOKEN_ADDRESS) {
+    return res.status(503).json({ error: "EVM token address not configured" });
+  }
+
+  try {
+    const publicClient = createPublicClient({
+      chain: foundry,
+      transport: http(EVM_RPC_URL),
+    });
+
+    const balance = await publicClient.readContract({
+      address: EVM_TOKEN_ADDRESS as `0x${string}`,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [DEMO_EVM_ADDRESS as `0x${string}`],
+    }) as bigint;
+
+    const formatted = (balance / 1000000n).toString();
+
+    res.json({
+      balance: balance.toString(),
+      formatted,
+      address: DEMO_EVM_ADDRESS,
+    });
+  } catch (error) {
+    console.error("Error getting EVM balance:", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: `Failed to get EVM balance: ${errorMessage}` });
+  }
+});
+
+// Demo - Transfer bUSDC from demo EVM account to bridge deposit address
+app.post("/api/demo/transfer-evm-to-bridge", async (req, res) => {
+  if (!EVM_TOKEN_ADDRESS) {
+    return res.status(503).json({ error: "EVM token address not configured" });
+  }
+
+  if (!reverseBridge) {
+    return res.status(503).json({ error: "Reverse bridge is not enabled" });
+  }
+
+  try {
+    const { amount } = req.body;
+    if (!amount) {
+      return res.status(400).json({ error: "amount is required" });
+    }
+
+    const transferAmount = BigInt(amount);
+    const depositAddress = reverseBridge.getDepositAddress();
+
+    if (!depositAddress) {
+      return res.status(500).json({ error: "Bridge deposit address not available" });
+    }
+
+    console.log(`[Demo] Transferring ${transferAmount} bUSDC from demo account to bridge...`);
+
+    const account = privateKeyToAccount(DEMO_EVM_PRIVATE_KEY as `0x${string}`);
+    const publicClient = createPublicClient({
+      chain: foundry,
+      transport: http(EVM_RPC_URL),
+    });
+    const walletClient = createWalletClient({
+      account,
+      chain: foundry,
+      transport: http(EVM_RPC_URL),
+    });
+
+    const hash = await walletClient.writeContract({
+      address: EVM_TOKEN_ADDRESS as `0x${string}`,
+      abi: ERC20_ABI,
+      functionName: "transfer",
+      args: [depositAddress as `0x${string}`, transferAmount],
+    });
+
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    console.log(`[Demo] EVM transfer complete, tx: ${hash}`);
+
+    res.json({
+      success: receipt.status === "success",
+      txHash: hash,
+    });
+  } catch (error) {
+    console.error("Error in demo EVM transfer:", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: `Failed to transfer: ${errorMessage}` });
+  }
+});
+
 // Health check
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -419,12 +554,15 @@ app.listen(PORT, () => {
     .then(() => {
       console.log("[Server] Fully initialized and ready!");
       console.log("Endpoints:");
-      console.log("  POST /api/faucet - Get test USDC");
+      console.log("  POST /api/faucet - Get test USDC (public)");
+      console.log("  POST /api/faucet/private - Get test USDC (private, for frontend)");
       console.log("  POST /api/bridge/initiate - Start Aztec->EVM bridge");
       console.log("  GET  /api/bridge/status/:aztecAddress - Check bridge status");
       console.log("  POST /api/bridge/evm-to-aztec - Start EVM->Aztec bridge");
       console.log("  GET  /api/bridge/evm-to-aztec/status/:sessionId - Check reverse bridge status");
       console.log("  POST /api/test/transfer-private - Server-side private mint (testing)");
+      console.log("  GET  /api/demo/evm-balance - Demo EVM account balance");
+      console.log("  POST /api/demo/transfer-evm-to-bridge - Demo EVM transfer to bridge");
       console.log("  GET  /api/health - Server health check");
     })
     .catch((err) => {

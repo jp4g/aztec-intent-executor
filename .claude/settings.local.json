@@ -6,7 +6,8 @@
       "Bash(forge install:*)",
       "Bash(forge:*)",
       "Bash(yarn server:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }

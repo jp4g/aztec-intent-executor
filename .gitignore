@@ -7,3 +7,6 @@ evm/lib/
 evm/broadcast/
 evm-deployment.json
 deployment.json
+
+pxe_data_*
+wallet_data_*

@@ -7,7 +7,7 @@ import { fileURLToPath } from "url";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { TokenContract } from "@defi-wonderland/aztec-standards/artifacts/src/artifacts/Token.js";
 import { setupSandbox, getTestWallet, deployToken, deployAccount, mintTokensPublic } from "./utils.js";
-import { AztecToEvmBridge } from "./bridge.js";
+import { AztecToEvmBridge, EvmToAztecBridge } from "./bridge.js";
 import { AZTEC_NODE_URL, EVM_RPC_URL, SPONSORED_FPC_ADDRESS, logConfig } from "./config.js";
 import type { EmbeddedWallet } from "@aztec/wallets/embedded";
 import type { AztecNode } from "@aztec/aztec.js/node";
@@ -53,6 +53,7 @@ let wallet: EmbeddedWallet;
 let token: TokenContract;
 let minterAddress: AztecAddress;
 let bridge: AztecToEvmBridge | null = null;
+let reverseBridge: EvmToAztecBridge | null = null;
 let isInitialized = false;
 
 /**
@@ -176,6 +177,11 @@ async function initialize() {
     bridge = new AztecToEvmBridge(wallet, token, EVM_TOKEN_ADDRESS, EVM_PRIVATE_KEY, EVM_RPC_URL);
     await bridge.start();
     console.log(`[Server] Bridge initialized with EVM token at ${EVM_TOKEN_ADDRESS}`);
+
+    console.log("[Server] Initializing EVM -> Aztec reverse bridge...");
+    reverseBridge = new EvmToAztecBridge(wallet, token, minterAddress, EVM_TOKEN_ADDRESS, EVM_PRIVATE_KEY, EVM_RPC_URL);
+    await reverseBridge.start();
+    console.log(`[Server] Reverse bridge initialized`);
   } else {
     console.log("[Server] Bridge disabled - set EVM_TOKEN_ADDRESS and EVM_PRIVATE_KEY to enable");
   }
@@ -291,6 +297,66 @@ app.get("/api/bridge/status/:aztecAddress", (req, res) => {
   });
 });
 
+// Reverse Bridge - Initiate EVM -> Aztec bridge
+app.post("/api/bridge/evm-to-aztec", async (req, res) => {
+  if (!isInitialized) {
+    return res.status(503).json({ error: "Server is still initializing, please wait..." });
+  }
+
+  if (!reverseBridge) {
+    return res.status(503).json({ error: "Reverse bridge is not enabled. Set EVM_TOKEN_ADDRESS env var." });
+  }
+
+  try {
+    const { aztecAddress, amount } = req.body;
+    if (!aztecAddress || !amount) {
+      return res.status(400).json({ error: "aztecAddress and amount are required" });
+    }
+
+    const amountBigInt = BigInt(amount);
+
+    console.log(`[ReverseBridge] Initiating bridge for Aztec address ${aztecAddress}, amount: ${amountBigInt}`);
+    const session = reverseBridge.createSession(aztecAddress, amountBigInt);
+
+    res.json({
+      success: true,
+      sessionId: session.sessionId,
+      depositAddress: session.depositAddress,
+      expiresAt: session.expiresAt,
+      message: `Send ${amountBigInt} bUSDC to ${session.depositAddress} on Anvil within 5 minutes`,
+    });
+  } catch (error) {
+    console.error("Error initiating reverse bridge:", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: `Failed to initiate reverse bridge: ${errorMessage}` });
+  }
+});
+
+// Reverse bridge status
+app.get("/api/bridge/evm-to-aztec/status/:sessionId", (req, res) => {
+  if (!reverseBridge) {
+    return res.status(503).json({ error: "Reverse bridge is not enabled" });
+  }
+
+  const { sessionId } = req.params;
+  const session = reverseBridge.getSession(sessionId);
+
+  if (!session) {
+    return res.json({
+      status: "not_found",
+      message: "Session not found or expired",
+    });
+  }
+
+  res.json({
+    status: session.status,
+    aztecAddress: session.aztecAddress.toString(),
+    amount: session.amount.toString(),
+    expiresAt: session.expiresAt,
+    remainingTime: Math.max(0, session.expiresAt - Date.now()),
+  });
+});
+
 // Test endpoint - Transfer private tokens (for bridge testing)
 app.post("/api/test/transfer-private", async (req, res) => {
   if (!isInitialized) {
@@ -330,10 +396,14 @@ app.get("/api/health", (_req, res) => {
   res.json({
     status: isInitialized ? "ok" : "initializing",
     tokenAddress: isInitialized ? token.address.toString() : null,
+    minterAddress: isInitialized ? minterAddress.toString() : null,
     bridgeEnabled: !!bridge,
     evmTokenAddress: EVM_TOKEN_ADDRESS || null,
     sponsoredFpcAddress: SPONSORED_FPC_ADDRESS,
     activeBridgeSessions: bridge?.getActiveSessionsCount() || 0,
+    reverseBridgeEnabled: !!reverseBridge,
+    reverseBridgeDepositAddress: reverseBridge?.getDepositAddress() || null,
+    activeReverseBridgeSessions: reverseBridge?.getActiveSessionsCount() || 0,
     serverStartupTimestamp: SERVER_STARTUP_TIMESTAMP,
     environment: 'localnet',
     nodeUrl: AZTEC_NODE_URL,
@@ -352,6 +422,8 @@ app.listen(PORT, () => {
       console.log("  POST /api/faucet - Get test USDC");
       console.log("  POST /api/bridge/initiate - Start Aztec->EVM bridge");
       console.log("  GET  /api/bridge/status/:aztecAddress - Check bridge status");
+      console.log("  POST /api/bridge/evm-to-aztec - Start EVM->Aztec bridge");
+      console.log("  GET  /api/bridge/evm-to-aztec/status/:sessionId - Check reverse bridge status");
       console.log("  POST /api/test/transfer-private - Server-side private mint (testing)");
       console.log("  GET  /api/health - Server health check");
     })

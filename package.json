@@ -1,0 +1,34 @@
+{
+  "name": "aztec-private-intent-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "server": "tsx src/server.ts",
+    "test:bridge": "tsx src/test-bridge.ts",
+    "evm:build": "cd evm && forge build",
+    "evm:deploy": "cd evm && forge script script/Deploy.s.sol --rpc-url http://localhost:8545 --broadcast --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 --ffi"
+  },
+  "dependencies": {
+    "@aztec/accounts": "4.0.0-devnet.2-patch.1",
+    "@aztec/aztec.js": "4.0.0-devnet.2-patch.1",
+    "@aztec/ethereum": "4.0.0-devnet.2-patch.1",
+    "@aztec/foundation": "4.0.0-devnet.2-patch.1",
+    "@aztec/noir-contracts.js": "4.0.0-devnet.2-patch.1",
+    "@aztec/pxe": "4.0.0-devnet.2-patch.1",
+    "@aztec/stdlib": "4.0.0-devnet.2-patch.1",
+    "@aztec/wallets": "4.0.0-devnet.2-patch.1",
+    "@defi-wonderland/aztec-standards": "4.0.0-devnet.2-patch.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "viem": "^2.44.4"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.5.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

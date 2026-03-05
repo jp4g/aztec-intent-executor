@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+evm/out/
+evm/cache/
+evm/lib/
+evm/broadcast/
+evm-deployment.json
+deployment.json

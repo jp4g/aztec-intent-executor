@@ -43,7 +43,7 @@ export default (_, argv) => ({
       chunks: ['main'],
       scriptLoading: 'module',
     }),
-    new Dotenv({ path: './.env', systemvars: true }),
+    new Dotenv({ systemvars: true }),
     new webpack.ProvidePlugin({ Buffer: ['buffer', 'Buffer'] }),
   ],
   resolve: {

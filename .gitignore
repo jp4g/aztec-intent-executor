@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .env
+.env.localnet
+.env.production
 evm/out/
 evm/cache/
 evm/lib/

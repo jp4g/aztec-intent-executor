@@ -8,7 +8,20 @@
       "Bash(yarn server:*)",
       "Bash(curl:*)",
       "Bash(npx tsc:*)",
-      "Bash(npx webpack:*)"
+      "Bash(npx webpack:*)",
+      "Bash(lsof:*)",
+      "Bash(node:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.aztec.network)",
+      "Bash(yarn dev:*)",
+      "Bash(yarn add:*)",
+      "Bash(timeout 5 npx dotenv:*)",
+      "Bash(npx dotenv:*)",
+      "Bash(aztec setup-protocol-contracts:*)",
+      "Bash(aztec get-canonical-sponsored-fpc-address:*)",
+      "Bash(aztec:*)",
+      "Bash(npx tsx:*)",
+      "Bash(yarn evm:deploy:*)"
     ]
   }
 }

@@ -19,29 +19,29 @@ const accountCache = new Map<string, { address: AztecAddress; secret: Fr; salt: 
 /**
  * Initialize connection to Aztec node and create EmbeddedWallet
  */
-export async function initializeAztec(nodeUrl: string, fpcAddress: string): Promise<void> {
+export async function initializeAztec(nodeUrl: string, fpcAddress: string, proverEnabled: boolean = false): Promise<void> {
   if (isInitialized) return;
 
   console.log("[Aztec] Connecting to node:", nodeUrl);
+  console.log("[Aztec] Prover enabled:", proverEnabled);
   node = createAztecNodeClient(nodeUrl);
 
   console.log("[Aztec] Creating EmbeddedWallet...");
   const { EmbeddedWallet } = await import("@aztec/wallets/embedded");
-  wallet = await EmbeddedWallet.create(node, { pxeConfig: { proverEnabled: false } });
+  wallet = await EmbeddedWallet.create(node, { pxeConfig: { proverEnabled } });
 
-  // Register SponsoredFPC
+  // Register SponsoredFPC using deterministic address derivation
+  // (node.getContract() doesn't find canonical FPC — see devex/sponsored-fpc-registration.md)
   if (fpcAddress) {
     console.log("[Aztec] Registering SponsoredFPC...");
     const { SponsoredFPCContract } = await import("@aztec/noir-contracts.js/SponsoredFPC");
-    const sponsoredFpcAddr = AztecAddress.fromString(fpcAddress);
-    const sponsoredFpcInstance = await node.getContract(sponsoredFpcAddr);
-
-    if (sponsoredFpcInstance) {
-      await wallet.registerContract(sponsoredFpcInstance, SponsoredFPCContract.artifact);
-      console.log("[Aztec] SponsoredFPC registered successfully");
-    } else {
-      console.warn("[Aztec] SponsoredFPC contract not found at", fpcAddress);
-    }
+    const { getContractInstanceFromInstantiationParams } = await import("@aztec/aztec.js/contracts");
+    const sponsoredFPCInstance = await getContractInstanceFromInstantiationParams(
+      SponsoredFPCContract.artifact,
+      { salt: new Fr(0) },
+    );
+    await wallet.registerContract(sponsoredFPCInstance, SponsoredFPCContract.artifact);
+    console.log("[Aztec] SponsoredFPC registered at", sponsoredFPCInstance.address.toString());
   }
 
   isInitialized = true;
@@ -176,12 +176,10 @@ export async function syncPXE(): Promise<void> {
 }
 
 /**
- * Generate a random hex secret (32 bytes)
+ * Generate a random field-safe secret using Fr.random()
  */
 export function generateRandomSecret(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return "0x" + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  return Fr.random().toString();
 }
 
 export { Fr, AztecAddress };

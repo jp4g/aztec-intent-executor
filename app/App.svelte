@@ -16,8 +16,7 @@
     address: string;
   }
 
-  const DEMO_EVM_ADDRESS = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
-  const STORAGE_KEY = 'aztecBridgeAccount';
+  const STORAGE_KEY_BASE = 'aztecBridgeAccount';
 
   // Initialization state
   let serverReady = $state(false);
@@ -35,6 +34,8 @@
   let evmTokenAddress = $state<string | null>(null);
   let fpcAddress = $state<string | null>(null);
   let nodeUrl = $state<string | null>(null);
+  let isProduction = $state(false);
+  let demoEvmAddress = $state<string | null>(null);
 
   // Bridge state
   let bridgeToEvmAmount = $state<number | null>(null);
@@ -76,12 +77,16 @@
       evmTokenAddress = health.evmTokenAddress;
       fpcAddress = health.sponsoredFpcAddress;
       nodeUrl = health.nodeUrl;
+      isProduction = health.isProduction || false;
+      demoEvmAddress = health.demoEvmAddress || null;
       serverReady = true;
-      addLog("Server connected", "success");
+      addLog(`Server connected (${health.environment || 'localnet'})`, "success");
 
       // Step 2: Initialize Aztec client in browser
-      initStatus = "Initializing Aztec client (this may take a moment)...";
-      await initializeAztec(nodeUrl!, fpcAddress!);
+      initStatus = isProduction
+        ? "Initializing Aztec client (production — proving enabled, may take longer)..."
+        : "Initializing Aztec client (this may take a moment)...";
+      await initializeAztec(nodeUrl!, fpcAddress!, isProduction);
       aztecReady = true;
       addLog("Aztec client initialized", "success");
 
@@ -136,11 +141,17 @@
     }
   }
 
+  function getStorageKey(): string {
+    const env = isProduction ? 'production' : 'localnet';
+    return `${STORAGE_KEY_BASE}_${env}`;
+  }
+
   async function initializeAccount() {
-    const stored = localStorage.getItem(STORAGE_KEY);
+    const storageKey = getStorageKey();
+    const stored = localStorage.getItem(storageKey);
     if (stored) {
       const parsed = JSON.parse(stored);
-      // Re-register account with browser's Aztec client
+      // Re-register account with browser's Aztec client (don't redeploy)
       const account = await createAccount(parsed.secret, parsed.salt);
       userAccount = {
         secret: parsed.secret,
@@ -157,11 +168,11 @@
     const secret = generateRandomSecret();
     const salt = generateRandomSecret();
 
-    addLog("Creating new account...", "info");
+    addLog("Creating new account (deploying, may take a few minutes in production)...", "info");
     const account = await createAccount(secret, salt, true, fpcAddress!);
 
     userAccount = { secret, salt, address: account.address };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(userAccount));
+    localStorage.setItem(getStorageKey(), JSON.stringify(userAccount));
     addLog(`Account created: ${truncateAddress(account.address)}`, "success");
   }
 
@@ -223,7 +234,7 @@
   }
 
   async function bridgeToEvm() {
-    if (!bridgeToEvmAmount || bridgeToEvmAmount <= 0 || !userAccount || !tokenAddress || !fpcAddress) return;
+    if (!bridgeToEvmAmount || bridgeToEvmAmount <= 0 || !userAccount || !tokenAddress || !fpcAddress || !demoEvmAddress) return;
     isBridgingToEvm = true;
     bridgeToEvmStatus = "";
     const amount = BigInt(Math.floor(bridgeToEvmAmount * 1e6));
@@ -237,7 +248,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          evmAddress: DEMO_EVM_ADDRESS,
+          evmAddress: demoEvmAddress,
           senderAddress: userAccount.address,
         }),
       });
@@ -391,7 +402,7 @@
       <h1>Aztec Private Intent <span>Bridge</span></h1>
       <div class="status-badge ready">
         <span class="status-dot"></span>
-        Connected
+        {isProduction ? 'Production' : 'Localnet'}
       </div>
     </header>
 
@@ -416,9 +427,9 @@
       </div>
 
       <div class="account-card evm">
-        <h3>EVM (Anvil)</h3>
+        <h3>EVM ({isProduction ? 'Base Sepolia' : 'Anvil'})</h3>
         <div class="label">Address</div>
-        <div class="address">{truncateAddress(DEMO_EVM_ADDRESS)}</div>
+        <div class="address">{demoEvmAddress ? truncateAddress(demoEvmAddress) : '...'}</div>
         <div class="balance">{evmBalance} <span class="balance-label">bUSDC</span></div>
         <button class="btn btn-secondary btn-sm btn-faucet" onclick={refreshBalances} disabled={isRefreshing}>
           {#if isRefreshing}

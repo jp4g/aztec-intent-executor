@@ -1,11 +1,11 @@
 import { createPublicClient, createWalletClient, http, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { foundry } from "viem/chains";
 import { Fr } from "@aztec/aztec.js/fields";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import type { EmbeddedWallet } from "@aztec/wallets/embedded";
 import type { TokenContract } from "@defi-wonderland/aztec-standards/artifacts/src/artifacts/Token.js";
 import type { PXE } from "@aztec/pxe/server";
+import { getViemChain } from "./config.js";
 
 interface BridgeSession {
   evmAddress: string;
@@ -39,6 +39,7 @@ export class EvmToAztecBridge {
   private wallet: EmbeddedWallet;
   private token: TokenContract;
   private minterAddress: AztecAddress;
+  private fpcAddress: string;
   private evmTokenAddress: `0x${string}`;
   private evmRpcUrl: string;
   private bridgeWalletAddress: `0x${string}`;
@@ -50,6 +51,7 @@ export class EvmToAztecBridge {
     wallet: EmbeddedWallet,
     token: TokenContract,
     minterAddress: AztecAddress,
+    fpcAddress: string,
     evmTokenAddress: string,
     evmPrivateKey: string,
     evmRpcUrl: string = "http://localhost:8545"
@@ -57,6 +59,7 @@ export class EvmToAztecBridge {
     this.wallet = wallet;
     this.token = token;
     this.minterAddress = minterAddress;
+    this.fpcAddress = fpcAddress;
     this.evmTokenAddress = evmTokenAddress as `0x${string}`;
     this.evmRpcUrl = evmRpcUrl;
 
@@ -115,8 +118,9 @@ export class EvmToAztecBridge {
   }
 
   private async getEvmBalance(): Promise<bigint> {
+    const chain = await getViemChain();
     const publicClient = createPublicClient({
-      chain: foundry,
+      chain,
       transport: http(this.evmRpcUrl),
     });
 
@@ -167,7 +171,7 @@ export class EvmToAztecBridge {
           try {
             const { mintTokensPrivate } = await import("./utils.js");
             console.log(`[ReverseBridge] Minting ${matched.amount} USDC privately to ${matched.aztecAddress.toString()}...`);
-            await mintTokensPrivate(this.token, this.minterAddress, matched.aztecAddress, matched.amount);
+            await mintTokensPrivate(this.token, this.minterAddress, matched.aztecAddress, matched.amount, this.fpcAddress);
 
             matched.status = "completed";
             console.log(`[ReverseBridge] Session ${matched.id} completed!`);
@@ -387,14 +391,15 @@ export class AztecToEvmBridge {
     const account = privateKeyToAccount(this.evmPrivateKey);
     console.log(`[Bridge] Minter account: ${account.address}`);
 
+    const chain = await getViemChain();
     const publicClient = createPublicClient({
-      chain: foundry,
+      chain,
       transport: http(this.evmRpcUrl),
     });
 
     const walletClient = createWalletClient({
       account,
-      chain: foundry,
+      chain,
       transport: http(this.evmRpcUrl),
     });
 

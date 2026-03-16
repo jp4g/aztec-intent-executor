@@ -4,15 +4,16 @@ import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { EmbeddedWallet } from "@aztec/wallets/embedded";
 import { type AccountManager } from "@aztec/aztec.js/wallet";
 import { TokenContract } from "@defi-wonderland/aztec-standards/artifacts/src/artifacts/Token.js";
-import { AZTEC_NODE_URL, SPONSORED_FPC_ADDRESS } from "./config.js";
+import { AZTEC_NODE_URL, SPONSORED_FPC_ADDRESS, IS_PRODUCTION } from "./config.js";
 
 /**
  * Get the SponsoredFeePaymentMethod.
  */
-async function getSponsoredPaymentMethod() {
-  if (!SPONSORED_FPC_ADDRESS) return undefined;
+async function getSponsoredPaymentMethod(fpcAddressOverride?: string) {
+  const addr = fpcAddressOverride || SPONSORED_FPC_ADDRESS;
+  if (!addr) return undefined;
   const { SponsoredFeePaymentMethod } = await import("@aztec/aztec.js/fee");
-  return new SponsoredFeePaymentMethod(AztecAddress.fromString(SPONSORED_FPC_ADDRESS));
+  return new SponsoredFeePaymentMethod(AztecAddress.fromString(addr));
 }
 
 /**
@@ -30,7 +31,7 @@ export async function getTestWallet(node: AztecNode): Promise<{
   accounts: AztecAddress[];
   accountManagers: AccountManager[];
 }> {
-  const wallet = await EmbeddedWallet.create(node, { pxeConfig: { proverEnabled: false } });
+  const wallet = await EmbeddedWallet.create(node, { pxeConfig: { proverEnabled: IS_PRODUCTION } });
 
   const accounts: AztecAddress[] = [];
   const accountManagers: AccountManager[] = [];
@@ -50,8 +51,8 @@ export async function getTestWallet(node: AztecNode): Promise<{
 /**
  * Deploy an account using SponsoredFPC for fee payment.
  */
-export async function deployAccount(accountManager: AccountManager): Promise<void> {
-  const paymentMethod = await getSponsoredPaymentMethod();
+export async function deployAccount(accountManager: AccountManager, fpcAddress?: string): Promise<void> {
+  const paymentMethod = await getSponsoredPaymentMethod(fpcAddress);
   if (!paymentMethod) {
     throw new Error("Cannot deploy account without a SponsoredFPC address configured");
   }
@@ -69,9 +70,10 @@ export async function deployToken(
   admin: AztecAddress,
   name: string = "USDC",
   symbol: string = "USDC",
-  decimals: number = 6
+  decimals: number = 6,
+  fpcAddress?: string
 ): Promise<TokenContract> {
-  const paymentMethod = await getSponsoredPaymentMethod();
+  const paymentMethod = await getSponsoredPaymentMethod(fpcAddress);
   const token = await TokenContract.deployWithOpts(
     { wallet, method: "constructor_with_minter" },
     name,
@@ -91,9 +93,10 @@ export async function mintTokensPrivate(
   token: TokenContract,
   from: AztecAddress,
   to: AztecAddress,
-  amount: bigint
+  amount: bigint,
+  fpcAddress?: string
 ): Promise<void> {
-  const paymentMethod = await getSponsoredPaymentMethod();
+  const paymentMethod = await getSponsoredPaymentMethod(fpcAddress);
   await token.methods.mint_to_private(to, amount)
     .send({ from, ...(paymentMethod ? { fee: { paymentMethod } } : {}) });
 }
@@ -105,9 +108,10 @@ export async function mintTokensPublic(
   token: TokenContract,
   from: AztecAddress,
   to: AztecAddress,
-  amount: bigint
+  amount: bigint,
+  fpcAddress?: string
 ): Promise<void> {
-  const paymentMethod = await getSponsoredPaymentMethod();
+  const paymentMethod = await getSponsoredPaymentMethod(fpcAddress);
   await token.methods.mint_to_public(to, amount)
     .send({ from, ...(paymentMethod ? { fee: { paymentMethod } } : {}) });
 }
@@ -130,9 +134,10 @@ export async function transferPrivate(
   token: TokenContract,
   from: AztecAddress,
   to: AztecAddress,
-  amount: bigint
+  amount: bigint,
+  fpcAddress?: string
 ): Promise<void> {
-  const paymentMethod = await getSponsoredPaymentMethod();
+  const paymentMethod = await getSponsoredPaymentMethod(fpcAddress);
   await token.methods.transfer_private_to_private(from, to, amount, 0n)
     .send({ from, ...(paymentMethod ? { fee: { paymentMethod } } : {}) });
 }

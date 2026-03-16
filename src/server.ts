@@ -8,30 +8,21 @@ import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { TokenContract } from "@defi-wonderland/aztec-standards/artifacts/src/artifacts/Token.js";
 import { setupSandbox, getTestWallet, deployToken, deployAccount, mintTokensPublic } from "./utils.js";
 import { AztecToEvmBridge, EvmToAztecBridge } from "./bridge.js";
-import { AZTEC_NODE_URL, EVM_RPC_URL, SPONSORED_FPC_ADDRESS, logConfig } from "./config.js";
+import { AZTEC_NODE_URL, EVM_RPC_URL, EVM_CHAIN_NAME, SPONSORED_FPC_ADDRESS, IS_PRODUCTION, AZTEC_ENV, logConfig, getViemChain, DEMO_EVM_PRIVATE_KEY, DEMO_EVM_ADDRESS } from "./config.js";
 import type { EmbeddedWallet } from "@aztec/wallets/embedded";
 import type { AztecNode } from "@aztec/aztec.js/node";
 import { createPublicClient, createWalletClient, http, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { foundry } from "viem/chains";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Anvil config for fee juice bridging
-const ANVIL_RPC_URL = 'http://localhost:8545';
-const ANVIL_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
-
-// Demo EVM account (Anvil account #1)
-const DEMO_EVM_ADDRESS = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
-const DEMO_EVM_PRIVATE_KEY = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
 
 const ERC20_ABI = parseAbi([
   "function balanceOf(address account) external view returns (uint256)",
   "function transfer(address to, uint256 amount) external returns (bool)",
 ]);
 
-const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3001;
+const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3002;
 const FAUCET_AMOUNT = 1000n * 1000000n; // 1000 USDC with 6 decimals
 
 const SERVER_STARTUP_TIMESTAMP = Date.now();
@@ -67,6 +58,7 @@ let minterAddress: AztecAddress;
 let bridge: AztecToEvmBridge | null = null;
 let reverseBridge: EvmToAztecBridge | null = null;
 let isInitialized = false;
+let activeFpcAddress: string = SPONSORED_FPC_ADDRESS;
 
 /**
  * Fund the canonical SponsoredFPC with fee juice by bridging from L1 (Anvil).
@@ -89,9 +81,9 @@ async function fundFPCWithFeeJuice(
   const { createExtendedL1Client } = await import('@aztec/ethereum/client');
   const { L1FeeJuicePortalManager } = await import('@aztec/aztec.js/ethereum');
   const { createLogger } = await import('@aztec/foundation/log');
-  const { foundry } = await import('viem/chains');
 
-  const l1Client = createExtendedL1Client([ANVIL_RPC_URL], ANVIL_PRIVATE_KEY, foundry);
+  const chain = await getViemChain();
+  const l1Client = createExtendedL1Client([EVM_RPC_URL], EVM_PRIVATE_KEY!, chain as any);
   const logger = createLogger('fee-juice-funding');
   const portalManager = await L1FeeJuicePortalManager.new(node, l1Client, logger);
 
@@ -140,26 +132,32 @@ async function initialize() {
   const result = await getTestWallet(node);
   wallet = result.wallet;
 
-  // Verify canonical SponsoredFPC exists, register it with PXE, and fund it
-  const fpcAddr = AztecAddress.fromString(SPONSORED_FPC_ADDRESS);
-  const fpcInstance = await node.getContract(fpcAddr);
-  if (fpcInstance) {
-    console.log(`[Server] Canonical SponsoredFPC found at ${SPONSORED_FPC_ADDRESS}`);
+  // Set up SponsoredFPC: derive address from artifact + salt (as per Aztec docs)
+  const { SponsoredFPCContract } = await import('@aztec/noir-contracts.js/SponsoredFPC');
+  const { getContractInstanceFromInstantiationParams } = await import('@aztec/aztec.js/contracts');
+  const { Fr } = await import('@aztec/aztec.js/fields');
 
-    // Register the SponsoredFPC contract with the wallet's PXE so it can be used for fee payment
-    const { SponsoredFPCContract } = await import('@aztec/noir-contracts.js/SponsoredFPC');
-    await wallet.registerContract(fpcInstance, SponsoredFPCContract.artifact);
-    console.log(`[Server] SponsoredFPC registered with PXE`);
+  const sponsoredFPCInstance = await getContractInstanceFromInstantiationParams(
+    SponsoredFPCContract.artifact,
+    { salt: new Fr(0) },
+  );
+  const fpcAddr = sponsoredFPCInstance.address;
+  activeFpcAddress = fpcAddr.toString();
+  console.log(`[Server] SponsoredFPC address derived: ${activeFpcAddress}`);
 
+  await wallet.registerContract(sponsoredFPCInstance, SponsoredFPCContract.artifact);
+  console.log(`[Server] SponsoredFPC registered with PXE`);
+
+  // On production, FPC is already funded; on localnet, fund from L1
+  if (IS_PRODUCTION) {
+    console.log('[Server] Production: SponsoredFPC is already funded');
+  } else {
     try {
       const feePayerAddress = result.accounts[0];
       await fundFPCWithFeeJuice(node, fpcAddr, feePayerAddress);
     } catch (error) {
       console.error('[Server] Failed to fund SponsoredFPC:', error);
-      console.warn('[Server] FPC exists but may not have fee juice');
     }
-  } else {
-    console.warn(`[Server] Canonical SponsoredFPC NOT found at ${SPONSORED_FPC_ADDRESS}`);
   }
 
   // Deploy minter account with FPC, then deploy token
@@ -167,7 +165,7 @@ async function initialize() {
 
   console.log("[Server] Deploying minter account with SponsoredFPC...");
   try {
-    await deployAccount(result.accountManagers[0]);
+    await deployAccount(result.accountManagers[0], activeFpcAddress);
   } catch (deployError: any) {
     if (deployError.message?.includes("already deployed") || deployError.message?.includes("nullifier")) {
       console.log("[Server] Minter account already deployed");
@@ -177,7 +175,7 @@ async function initialize() {
   }
 
   console.log("[Server] Deploying new USDC token...");
-  token = await deployToken(wallet, minterAddress, "USDC", "USDC", 6);
+  token = await deployToken(wallet, minterAddress, "USDC", "USDC", 6, activeFpcAddress);
 
   console.log(`[Server] Token initialized at ${token.address.toString()}`);
   console.log(`[Server] Minter address: ${minterAddress.toString()}`);
@@ -191,7 +189,7 @@ async function initialize() {
     console.log(`[Server] Bridge initialized with EVM token at ${EVM_TOKEN_ADDRESS}`);
 
     console.log("[Server] Initializing EVM -> Aztec reverse bridge...");
-    reverseBridge = new EvmToAztecBridge(wallet, token, minterAddress, EVM_TOKEN_ADDRESS, EVM_PRIVATE_KEY, EVM_RPC_URL);
+    reverseBridge = new EvmToAztecBridge(wallet, token, minterAddress, activeFpcAddress, EVM_TOKEN_ADDRESS, EVM_PRIVATE_KEY, EVM_RPC_URL);
     await reverseBridge.start();
     console.log(`[Server] Reverse bridge initialized`);
   } else {
@@ -223,7 +221,7 @@ app.post("/api/faucet", async (req, res) => {
     await wallet.registerSender(recipient, 'faucet-recipient');
 
     console.log(`[Faucet] Minting 1000 USDC (PUBLIC) to ${address}...`);
-    await mintTokensPublic(token, minterAddress, recipient, FAUCET_AMOUNT);
+    await mintTokensPublic(token, minterAddress, recipient, FAUCET_AMOUNT, activeFpcAddress);
     console.log(`[Faucet] Mint complete to ${address}`);
 
     res.json({
@@ -387,7 +385,7 @@ app.post("/api/test/transfer-private", async (req, res) => {
     console.log(`[Test] Transferring ${transferAmount} USDC privately to ${to}...`);
 
     const { mintTokensPrivate } = await import("./utils.js");
-    await mintTokensPrivate(token, minterAddress, recipient, transferAmount);
+    await mintTokensPrivate(token, minterAddress, recipient, transferAmount, activeFpcAddress);
 
     console.log(`[Test] Private transfer complete to ${to}`);
 
@@ -422,7 +420,7 @@ app.post("/api/faucet/private", async (req, res) => {
 
     console.log(`[Faucet] Minting 1000 USDC (PRIVATE) to ${address}...`);
     const { mintTokensPrivate } = await import("./utils.js");
-    await mintTokensPrivate(token, minterAddress, recipient, FAUCET_AMOUNT);
+    await mintTokensPrivate(token, minterAddress, recipient, FAUCET_AMOUNT, activeFpcAddress);
     console.log(`[Faucet] Private mint complete to ${address}`);
 
     res.json({
@@ -441,10 +439,14 @@ app.get("/api/demo/evm-balance", async (_req, res) => {
   if (!EVM_TOKEN_ADDRESS) {
     return res.status(503).json({ error: "EVM token address not configured" });
   }
+  if (!DEMO_EVM_ADDRESS) {
+    return res.status(503).json({ error: "Demo EVM account not configured" });
+  }
 
   try {
+    const chain = await getViemChain();
     const publicClient = createPublicClient({
-      chain: foundry,
+      chain,
       transport: http(EVM_RPC_URL),
     });
 
@@ -494,14 +496,15 @@ app.post("/api/demo/transfer-evm-to-bridge", async (req, res) => {
 
     console.log(`[Demo] Transferring ${transferAmount} bUSDC from demo account to bridge...`);
 
-    const account = privateKeyToAccount(DEMO_EVM_PRIVATE_KEY as `0x${string}`);
+    const account = privateKeyToAccount(DEMO_EVM_PRIVATE_KEY!);
+    const chain = await getViemChain();
     const publicClient = createPublicClient({
-      chain: foundry,
+      chain,
       transport: http(EVM_RPC_URL),
     });
     const walletClient = createWalletClient({
       account,
-      chain: foundry,
+      chain,
       transport: http(EVM_RPC_URL),
     });
 
@@ -527,21 +530,27 @@ app.post("/api/demo/transfer-evm-to-bridge", async (req, res) => {
 });
 
 // Health check
-app.get("/api/health", (_req, res) => {
+app.get("/api/health", async (_req, res) => {
+  const chain = await getViemChain();
   res.json({
     status: isInitialized ? "ok" : "initializing",
     tokenAddress: isInitialized ? token.address.toString() : null,
     minterAddress: isInitialized ? minterAddress.toString() : null,
     bridgeEnabled: !!bridge,
     evmTokenAddress: EVM_TOKEN_ADDRESS || null,
-    sponsoredFpcAddress: SPONSORED_FPC_ADDRESS,
+    sponsoredFpcAddress: activeFpcAddress,
     activeBridgeSessions: bridge?.getActiveSessionsCount() || 0,
     reverseBridgeEnabled: !!reverseBridge,
     reverseBridgeDepositAddress: reverseBridge?.getDepositAddress() || null,
     activeReverseBridgeSessions: reverseBridge?.getActiveSessionsCount() || 0,
     serverStartupTimestamp: SERVER_STARTUP_TIMESTAMP,
-    environment: 'localnet',
+    environment: AZTEC_ENV,
+    isProduction: IS_PRODUCTION,
     nodeUrl: AZTEC_NODE_URL,
+    evmRpcUrl: EVM_RPC_URL,
+    evmChainId: chain.id,
+    evmChainName: EVM_CHAIN_NAME,
+    demoEvmAddress: DEMO_EVM_ADDRESS || null,
   });
 });
 
@@ -566,7 +575,8 @@ app.listen(PORT, () => {
       console.log("  GET  /api/health - Server health check");
     })
     .catch((err) => {
-      console.error("[Server] Failed to initialize:", err);
+      console.error("[Server] Failed to initialize:", err?.message || err);
+      if (err?.stack) console.error(err.stack);
       process.exit(1);
     });
 });

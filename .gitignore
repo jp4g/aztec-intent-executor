@@ -9,6 +9,8 @@ evm/lib/
 evm/broadcast/
 evm-deployment.json
 deployment.json
+intent-deployment.json
+circuits/intent/target/
 
 pxe_data_*
 wallet_data_*

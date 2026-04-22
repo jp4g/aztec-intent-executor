@@ -1,295 +1,219 @@
-# Aztec Private Intent Bridge
+# Aztec Intent Executor
 
-Bi-directional bridge between Aztec (private) and EVM. Send private tokens on Aztec, receive equivalent ERC20 tokens on EVM — and vice versa. Supports two deployment modes:
+Bridge private USDC from Aztec to a **counterfactual create2 smart account on EVM**, then run arbitrary batched actions on that account gated by a Noir ZK proof — no EVM EOA, no private key on the EVM side.
 
-- **Localnet**: Aztec localnet + Anvil (local development)
-- **Production**: Aztec devnet + Base Sepolia (real testnet)
-
-On top of the token bridge, this repo also ships an **intent executor**: bridged bUSDC can be minted directly to a create2'd smart account on EVM whose actions are gated by a Noir proof of knowledge of the account's salt preimage. See [Intent Executor](#intent-executor) below.
-
-## Architecture
+## What it does
 
 ```
-Browser (Svelte app on :5173)              Server (Express on :3001)
-├── EmbeddedWallet (own PXE)               ├── Faucet: mintTokensPrivate
-├── Account from localStorage              ├── Forward bridge: Aztec→EVM
-├── Private transfer (client-side)         ├── Reverse bridge: EVM→Aztec
-├── Balance queries (client-side)          └── EVM transfer proxy (demo account)
-└── Polls server APIs for bridge status
+Aztec (private)                               EVM (Anvil or Base Sepolia)
+─────────────────                             ────────────────────────────
+user's private transfer                       bUSDC minted at the
+→ ephemeral deposit note   ─── bridge ───→    counterfactual IntentAccount
+                                              address (create2, not
+                                              deployed yet)
 
-Aztec → EVM:
-  User → private transfer → ephemeral deposit address
-                                   ↓
-  Bridge server polls balance → detects deposit → mints bUSDC on EVM
+                                              ↓
 
-EVM → Aztec:
-  User → sends bUSDC to bridge wallet on EVM
-                                   ↓
-  Bridge server detects deposit → mints private USDC on Aztec
+                                              user generates a Noir proof
+                                              of knowledge of the salt's
+                                              preimage, bound to a batch
+                                              of EVM calls via sha256.
+
+                                              factory.deployAndExecuteBatch
+                                              lazily deploys the clone and
+                                              runs the batch as it:
+                                                - approve + swap
+                                                - approve + vault deposit
+                                                - redeem + swap + send
+                                                - any (target,value,data)[]
 ```
+
+No EVM signature ever authorizes anything — the proof is the authorization. The bridge is used only to get funds into the counterfactual address.
 
 ## Prerequisites
 
 - Node.js 18+ and Yarn
-- [Foundry](https://book.getfoundry.sh/) installed
+- [Foundry](https://book.getfoundry.sh/)
+- `aztec` CLI matching the SDK version in `package.json` (currently `4.2.0-aztecnr-rc.2`; install with `aztec-up -v 4.2.0-aztecnr-rc.2`). Version mismatch → `Invalid tx: Incorrect verification keys tree root`.
+- `nargo 1.0.0-beta.19` at `$HOME/.nargo/bin/nargo` (`noirup -v 1.0.0-beta.19`) — only needed if you want to rebuild the circuit.
 
-**For localnet:**
-- [Aztec Sandbox](https://docs.aztec.network/) running on `localhost:8080`
-- [Anvil](https://book.getfoundry.sh/reference/anvil/) running on `localhost:8545`
-
-**For production:**
-- A funded account on Base Sepolia (needs Sepolia ETH for gas)
-
-## Setup
+## Localnet quickstart
 
 ```bash
-# Install dependencies
 yarn install
-
-# Install Foundry libs (first time only)
 cd evm && forge install OpenZeppelin/openzeppelin-contracts && forge install foundry-rs/forge-std && cd ..
-```
 
-## Localnet
+cp .env.example .env.localnet      # defaults are fine for Anvil
 
-```bash
-# 1. Start Anvil and Aztec Sandbox (separate terminals)
-yarn anvil                  # anvil --code-size-limit 50000 --silent
-aztec start --local-network # must match the @aztec/* SDK version in package.json
+# Terminal 1–2: infra
+yarn anvil                         # anvil --code-size-limit 50000
+aztec start --local-network
 
-# 2. Deploy bUSDC to Anvil
-yarn evm:deploy
+# Deploy
+yarn evm:deploy                    # BridgedUSDC
+yarn evm:deploy:mocks              # MockWETH, MockSwapRouter (seeded), 2x MockLendingVault
+yarn evm:deploy:intent             # HonkVerifier, IntentAccount impl, IntentAccountFactory
 
-# 3. (Optional — only needed for the intent executor demo)
-yarn evm:deploy:mocks       # swap router, lending vault, second ERC20
-yarn evm:deploy:intent
-
-# 4. Start the bridge server
+# Terminal 3: bridge server
 yarn server
 
-# 5. Start the frontend (new terminal)
-yarn dev
+# Terminal 4: run the headless end-to-end test
+yarn test:intent
 ```
 
-The Aztec CLI (`aztec`) must be the same version as `@aztec/aztec.js` in `package.json` — otherwise the sandbox rejects every SDK-built tx with `Invalid tx: Incorrect verification keys tree root`. At the time of writing both are `4.2.0-aztecnr-rc.2`; `aztec-up -v 4.2.0-aztecnr-rc.2` installs the matching CLI.
+`test:intent` runs:
 
-Open `http://localhost:5173`.
+1. **Credential #1** — bridge 100 bUSDC, then transfer / replay-revert / swap / vault-deposit / vault-withdraw.
+2. **Credential #2** — bridge 100 bUSDC, then a three-tx roundtrip on one account: USDC→WETH (tx1) → WETH vault deposit (tx2) → redeem + swap back + deliver USDC to an EOA (tx3). Three proofs, three nullifiers, one reusable account.
 
 ## Production (Aztec devnet + Base Sepolia)
 
-### 1. Configure environment
+Copy `.env.example` to `.env.production` and fill in:
 
-Copy `.env.production` and fill in your keys:
-
-```bash
-cp .env.example .env.production
-```
-
-Edit `.env.production`:
 ```
 AZTEC_ENV=production
 AZTEC_NODE_URL=https://v4-devnet-2.aztec-labs.com
 EVM_RPC_URL=https://sepolia.base.org
 EVM_CHAIN=baseSepolia
-EVM_PRIVATE_KEY=<your funded Base Sepolia private key>
-DEMO_EVM_PRIVATE_KEY=<your demo account private key>
+EVM_PRIVATE_KEY=<your funded Base Sepolia key>
 SPONSORED_FPC_ADDRESS=0x09a4df73aa47f82531a038d1d51abfc85b27665c4b7ca751e2d4fa9f19caffb2
 PORT=3001
 ```
 
-### 2. Deploy bUSDC to Base Sepolia
+Then `yarn evm:deploy:base-sepolia`, set `EVM_TOKEN_ADDRESS` in `.env.production`, `yarn evm:deploy:intent:base-sepolia`, and `yarn server:production`. Base Sepolia accepts the 33.8 KB HonkVerifier without EIP-170 flags.
 
-```bash
-yarn evm:deploy:base-sepolia
-```
+## How the intent executor works
 
-After deployment, add the contract address to `.env.production`:
-```
-EVM_TOKEN_ADDRESS=<deployed address>
-```
+### Pieces
 
-### 3. Run
-
-```bash
-# Terminal 1: Start the bridge server
-yarn server:production
-
-# Terminal 2: Start the frontend
-yarn dev:production
-```
-
-Open `http://localhost:5173`.
-
-## Using the Demo
-
-1. The app initializes automatically — connects to the server, creates an Aztec wallet in your browser, and deploys an account with SponsoredFPC
-2. Click **"Get Test USDC"** to mint 1000 private USDC via the server faucet
-3. **Aztec → EVM**: Enter an amount and click **"Bridge →"** — client-side private transfer to a deposit address, then the server mints bUSDC on EVM (~30s)
-4. **EVM → Aztec**: Enter an amount and click **"← Bridge"** — the server transfers bUSDC from the demo account to the bridge wallet, then mints private USDC on Aztec (~30s)
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/health` | GET | Server status, token addresses, bridge state |
-| `/api/faucet` | POST | Mint 1000 USDC (public) to an Aztec address |
-| `/api/faucet/private` | POST | Mint 1000 USDC (private) to an Aztec address |
-| `/api/bridge/initiate` | POST | Create Aztec→EVM bridge session |
-| `/api/bridge/status/:aztecAddress` | GET | Check forward bridge session status |
-| `/api/bridge/evm-to-aztec` | POST | Create EVM→Aztec bridge session |
-| `/api/bridge/evm-to-aztec/status/:sessionId` | GET | Check reverse bridge session status |
-| `/api/demo/evm-balance` | GET | Query bUSDC balance of the demo EVM account |
-| `/api/demo/transfer-evm-to-bridge` | POST | Transfer bUSDC from demo account to bridge |
-
-## Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `AZTEC_ENV` | `localnet` | `localnet` or `production` |
-| `AZTEC_NODE_URL` | `http://localhost:8080` | Aztec node URL |
-| `EVM_RPC_URL` | `http://localhost:8545` | EVM RPC URL |
-| `EVM_CHAIN` | `foundry` | `foundry` (Anvil) or `baseSepolia` |
-| `EVM_PRIVATE_KEY` | Anvil account #0 | Bridge operator key (mints bUSDC) |
-| `DEMO_EVM_PRIVATE_KEY` | Anvil account #1 | Demo account for frontend |
-| `EVM_TOKEN_ADDRESS` | from `evm-deployment.json` | Deployed BridgedUSDC address |
-| `SPONSORED_FPC_ADDRESS` | canonical | Aztec SponsoredFPC address |
-| `PORT` | `3001` | Server port |
-
-## Scripts
-
-| Script | Description |
+| File | Purpose |
 |---|---|
-| `yarn server` | Start server (localnet) |
-| `yarn server:production` | Start server (production) |
-| `yarn dev` | Start frontend (localnet) |
-| `yarn dev:production` | Start frontend (production) |
-| `yarn build` | Production webpack build |
-| `yarn evm:deploy` | Deploy bUSDC to Anvil |
-| `yarn evm:deploy:base-sepolia` | Deploy bUSDC to Base Sepolia |
-| `yarn evm:deploy:mocks` | Deploy MockTokenB + MockSwapRouter (seeded) + MockLendingVault |
-| `yarn evm:deploy:intent` | Deploy IntentVerifier + IntentAccount impl + factory to Anvil |
-| `yarn evm:deploy:intent:base-sepolia` | Same, against Base Sepolia |
-| `yarn evm:build` | Compile Solidity contracts |
-| `yarn noir:build` | Compile the intent circuit and regenerate `IntentVerifier.sol` |
-| `yarn test:bridge` | Run headless bridge integration test |
-| `yarn test:intent` | Run headless intent-executor integration test |
-
-## Project Structure
-
-```
-├── app/                          # Frontend (Svelte + TypeScript)
-│   ├── main.ts                   # Entry point
-│   ├── App.svelte                # Main UI component
-│   ├── aztec-client.ts           # Browser-side Aztec client (EmbeddedWallet)
-│   ├── index.html                # HTML template
-│   └── style.css                 # Dark theme styles
-├── evm/                          # Solidity contracts
-│   ├── src/BridgedUSDC.sol       # ERC20 with onlyOwner mint, 6 decimals
-│   └── script/Deploy.s.sol       # Forge deploy script
-├── src/                          # Backend (Express + Aztec SDK)
-│   ├── config.ts                 # Environment config (localnet/production)
-│   ├── utils.ts                  # Aztec helpers (wallet, token, mint, transfer)
-│   ├── bridge.ts                 # Bridge classes (forward + reverse)
-│   ├── server.ts                 # Express server + API endpoints
-│   └── test-bridge.ts            # Integration test script
-├── circuits/intent/              # Noir circuit for intent proofs
-│   ├── Nargo.toml
-│   └── src/main.nr               # Poseidon2 preimage check + action-hash binding
-├── .env.localnet                 # Localnet config (Aztec localnet + Anvil)
-├── .env.production               # Production config (Aztec devnet + Base Sepolia)
-├── .env.example                  # Template with all variables
-├── webpack.config.js             # Webpack config (COOP/COEP, polyfills, proxy)
-├── tsconfig.json                 # TypeScript config
-└── package.json                  # Dependencies and scripts
-```
-
-## Intent Executor
-
-A non-custodial executor layer on top of the token bridge. Bridged bUSDC lands at a create2'd smart account whose actions require a Noir proof of knowledge of the account's salt preimage — no private key, no EOA custody.
+| `circuits/intent/src/main.nr` | Noir circuit: `Poseidon2(preimage) == salt`, with `action_hash_hi` / `action_hash_lo` as bound public inputs |
+| `evm/src/IntentVerifier.sol` | UltraHonk verifier generated from the circuit's VK |
+| `evm/src/IntentAccount.sol` | Per-salt EIP-1167 clone. `executeBatch(Call[], nullifier, proof)` verifies + runs the batch |
+| `evm/src/IntentAccountFactory.sol` | Deterministic deployer. `deployAndExecuteBatch` lazy-deploys the clone on first use |
+| `evm/src/MockWETH.sol` | 18-decimal ERC20 standing in for wrapped ether |
+| `evm/src/MockSwapRouter.sol` | Fixed-rate two-token AMM; seeded with bUSDC + WETH reserves at deploy |
+| `evm/src/MockLendingVault.sol` | Minimal ERC4626-ish single-asset vault, shares 1:1, no yield |
+| `src/intent-client.ts` | SDK: credential gen, action-hash, proving, submission, typed flow builders |
+| `src/test-intent.ts` | Headless end-to-end test |
+| `src/bridge.ts` + `src/server.ts` | Forward-only bridge: `/api/bridge/initiate`, `/api/bridge/status/:addr`, `/api/test/transfer-private`, `/api/health` |
 
 ### Flow
 
 ```
-1. Client generates random preimage, computes salt = Poseidon2(preimage)
+1. Client generates random preimage; salt = Poseidon2(preimage)
 2. Client derives intentAddr = Clones.predictDeterministicAddress(impl, salt, factory)
-3. Client bridges bUSDC from Aztec to intentAddr (unchanged forward bridge)
-4. Client builds Call[] (one or more (target, value, data) tuples) + a nullifier;
+3. Client bridges bUSDC from Aztec to intentAddr (forward bridge)
+4. Client builds Call[] (arbitrary N) + a fresh nullifier;
    actionHash = sha256(abi.encode(chainid, intentAddr, calls, nullifier))
-5. Client generates one Noir proof with public inputs [salt, actionHashHi, actionHashLo]
-6. Anyone calls factory.deployAndExecuteBatch(salt, calls, nullifier, proof)
-   – deploys the EIP-1167 clone if not yet deployed
-   – IntentAccount.executeBatch verifies the proof, re-hashes the batch, enforces
-     the nullifier, and runs every call as itself (atomic — any failure reverts all)
+5. Client generates ONE Noir proof with public inputs [salt, actionHashHi, actionHashLo]
+6. Anyone calls factory.deployAndExecuteBatch(salt, calls, nullifier, proof):
+     - if intentAddr has no code, cloneDeterministic(salt) + initialize
+     - IntentAccount.executeBatch: re-hashes on-chain, verifies proof, marks
+       nullifier, loops calls[] as itself. Any call failing reverts all.
 ```
 
-**One proof per batch.** `Call = (address target, uint256 value, bytes data)`. The circuit doesn't care what's inside the batch — it only sees the 256-bit action hash split into two field halves — so arbitrary N-call flows all prove in identical time.
-
-### Components
-
-| File | Purpose |
-|---|---|
-| `circuits/intent/src/main.nr` | `Poseidon2(preimage) == salt`; `actionHash` bound as public input |
-| `evm/src/IntentVerifier.sol` | UltraHonk verifier generated from the circuit's VK |
-| `evm/src/IntentAccount.sol` | Per-salt EIP-1167 clone with `executeBatch(Call[], nullifier, proof)` and nullifier map |
-| `evm/src/IntentAccountFactory.sol` | Deterministic deployer + `deployAndExecuteBatch` wrapper |
-| `evm/src/MockWETH.sol` | 18-dec ERC20 standing in for wrapped ether |
-| `evm/src/MockSwapRouter.sol` | Fixed-rate two-token AMM; seeded with reserves at deploy |
-| `evm/src/MockLendingVault.sol` | Minimal ERC4626-ish vault over a single asset; shares 1:1, no yield |
-| `evm/script/DeployIntent.s.sol` | Deploys verifier → impl → factory |
-| `evm/script/DeployMocks.s.sol` | Deploys + seeds the three mock targets |
-| `src/intent-client.ts` | SDK: credential gen, action-hash, proving, submission, typed flow builders |
-| `src/test-intent.ts` | Headless end-to-end test (transfer + swap + vault deposit/withdraw + replay) |
+**One proof per batch.** The circuit only ever sees `[salt, hi, lo]` — so an N-call batch proves in the same time as a 1-call batch.
 
 ### Flow builders (`src/intent-client.ts`)
-
-Typed helpers that build the `Call[]` for each scenario. Each flow is one batch, one proof.
 
 | Builder | Calls | Notes |
 |---|---|---|
 | `transferFlow(token, to, amount)` | 1 | ERC20 transfer |
 | `swapAndSendFlow({ router, tokenIn, tokenOut, amountIn, minAmountOut, recipient })` | 2 | `approve(router)` + `swapExactTokensForTokens(…, recipient)` — atomic |
 | `vaultDepositFlow({ vault, asset, amount, receiver })` | 2 | `approve(vault)` + `deposit(amount, receiver)` |
-| `vaultWithdrawFlow({ vault, shares, receiver, owner })` | 1 | `redeem(shares, receiver, owner)` |
+| `vaultWithdrawFlow({ vault, shares, receiver, owner })` | 1 | `redeem` (needs `owner == msg.sender`, i.e. the intent account) |
 
-ERC-2612 permit doesn't help replace `approve` here: the caller is the `IntentAccount` (a contract) which can't produce ECDSA signatures. EIP-1271 contract signatures would work but would add circuit surface — the batched proof is the cleaner primitive.
+Concatenate them for bigger batches (e.g. `[...redeem, ...swapAndSend]` for the roundtrip's tx3). ERC-2612 permit can't replace the `approve`: the sender is a contract and can't produce ECDSA signatures; EIP-1271 would add circuit surface for no real benefit.
 
-### Rebuilding the circuit and verifier
+### Rebuilding the circuit
 
 ```bash
 yarn noir:build
 ```
 
-This compiles the circuit with `nargo`, emits the VK with `bb write_vk`, and regenerates `evm/src/IntentVerifier.sol` via `bb write_solidity_verifier`. Then rerun `yarn evm:deploy:intent` to redeploy.
+Compiles with `nargo`, emits the VK with `bb write_vk`, regenerates `evm/src/IntentVerifier.sol` via `bb write_solidity_verifier`. Rerun `yarn evm:deploy:intent` after.
 
-### Versioning
+**Version alignment** — mismatches here cause `expected msgpack format marker (2 or 3), got 1` at proof time:
 
-The proving stack must stay aligned or bb.js rejects the witness with `expected msgpack format marker (2 or 3), got 1`:
-
-- `nargo 1.0.0-beta.19` at `$HOME/.nargo/bin/nargo` (`noirup -v 1.0.0-beta.19`). The `noir:build` script pins this path because `$HOME/.aztec/current/bin/nargo` is beta.18.
+- `nargo 1.0.0-beta.19` (the `noir:build` script pins `$HOME/.nargo/bin/nargo` because `$HOME/.aztec/current/bin/nargo` is beta.18)
 - `@noir-lang/noir_js@1.0.0-beta.19`
 - `@aztec/bb.js@4.2.0-aztecnr-rc.2`
 
-The `HonkVerifier` runtime bytecode is ~33.8 KB, which exceeds EIP-170. The `yarn anvil` script passes `--code-size-limit 50000` and the `evm:deploy:intent*` scripts pass `--disable-code-size-limit` so forge will broadcast it. Base Sepolia accepts contracts over 24 KB without extra flags.
-
-### Running the integration test
-
-With Anvil, the Aztec sandbox, and the bridge server running:
-
-```bash
-yarn evm:deploy           # bUSDC
-yarn evm:deploy:mocks     # MockTokenB + MockSwapRouter (seeded) + MockLendingVault
-yarn evm:deploy:intent    # verifier + impl + factory
-yarn test:intent          # transfer, swap-and-send, vault deposit, vault withdraw, replay-reverts
-```
-
-The test runs two sessions:
-
-1. **Credential #1** — bridges 100 bUSDC in, then runs transfer, replay-revert, swap-and-send, bUSDC-vault deposit, bUSDC-vault withdraw.
-2. **Credential #2** — bridges another 100 bUSDC into a fresh intent account and runs a three-tx roundtrip on the same account: tx1 swaps USDC→WETH, tx2 deposits the WETH into the WETH vault, tx3 redeems + swaps back + delivers USDC to the user's EOA in a single atomic batch. Same funds, three proofs, three nullifiers.
+The `HonkVerifier` runtime bytecode is ~33.8 KB, over EIP-170. `yarn anvil` passes `--code-size-limit 50000` and `evm:deploy:intent*` passes `--disable-code-size-limit`.
 
 ### Caveats
 
-- The circuit's `verifier` is immutable per intent account (set at init); evolving the circuit strands old accounts on old verifier bytecode. Fine for a demo; flag for prod.
-- Nullifier is a user-chosen `bytes32`. Reuse reverts, so losing track of used nullifiers just wastes a tx — funds stay recoverable. Losing the preimage permanently locks the account.
-- `MockLendingVault.redeem` requires `owner == msg.sender` (no ERC20 allowance machinery), so you can only redeem into your own intent account via a single-call batch. Real ERC4626 vaults typically accept an allowance-granted caller.
+- The verifier is immutable per intent account (set at init); circuit upgrades strand old accounts on old verifier bytecode. Fine for a demo.
+- Nullifier is a user-chosen `bytes32`; accidental reuse just wastes a tx. Losing the preimage permanently locks the account.
+- The bridge operator sees the destination EVM address (the counterfactual `intentAddr`), so the Aztec → EVM hop isn't fully unlinkable yet.
 
+## Scripts
+
+| Script | Description |
+|---|---|
+| `yarn anvil` | Anvil on :8545 with `--code-size-limit 50000` |
+| `yarn server` / `yarn server:production` | Bridge server (localnet / Base Sepolia) |
+| `yarn evm:deploy` / `yarn evm:deploy:base-sepolia` | Deploy bUSDC |
+| `yarn evm:deploy:mocks` | Deploy MockWETH + swap router (seeded) + two lending vaults |
+| `yarn evm:deploy:intent` / `yarn evm:deploy:intent:base-sepolia` | Deploy verifier + impl + factory |
+| `yarn evm:build` | `forge build` |
+| `yarn noir:build` | Recompile circuit + regenerate `IntentVerifier.sol` |
+| `yarn test:intent` | Run the headless end-to-end integration test |
+| `yarn test:circuit` | Proof pipeline sanity check (no bridge, no anvil) |
+
+## API (server)
+
+Only four endpoints — everything else that was here (faucet, reverse bridge, demo transfer) was stripped.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/health` | GET | Server status, Aztec + EVM token addresses |
+| `/api/bridge/initiate` | POST | Create Aztec→EVM bridge session for a given EVM destination |
+| `/api/bridge/status/:aztecAddress` | GET | Poll a bridge session by its Aztec deposit address |
+| `/api/test/transfer-private` | POST | Test helper: mint private USDC directly to an Aztec address |
+
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `AZTEC_ENV` | `localnet` | `localnet` or `production` |
+| `AZTEC_NODE_URL` | `http://localhost:8080` (localnet) | Aztec node URL |
+| `EVM_RPC_URL` | `http://localhost:8545` (localnet) | EVM RPC |
+| `EVM_CHAIN` | `foundry` (localnet) | `foundry` or `baseSepolia` |
+| `EVM_PRIVATE_KEY` | Anvil account #0 | Bridge operator / deployer key |
+| `EVM_TOKEN_ADDRESS` | from `evm-deployment.json` | Deployed BridgedUSDC address |
+| `SPONSORED_FPC_ADDRESS` | canonical | Aztec SponsoredFPC |
+| `PORT` | `3001` | Server port |
+
+## Project layout
+
+```
+├── evm/
+│   ├── src/BridgedUSDC.sol           # 6-dec ERC20, onlyOwner mint
+│   ├── src/IntentAccount.sol         # executeBatch(Call[], nullifier, proof)
+│   ├── src/IntentAccountFactory.sol  # create2 + deployAndExecuteBatch
+│   ├── src/IntentVerifier.sol        # UltraHonk verifier (generated)
+│   ├── src/MockWETH.sol
+│   ├── src/MockSwapRouter.sol
+│   ├── src/MockLendingVault.sol
+│   └── script/
+│       ├── Deploy.s.sol              # bUSDC
+│       ├── DeployMocks.s.sol         # WETH, router, two vaults
+│       └── DeployIntent.s.sol        # verifier + impl + factory
+├── circuits/intent/
+│   ├── Nargo.toml
+│   └── src/main.nr                   # Poseidon2 preimage + action_hash binding
+├── src/
+│   ├── config.ts                     # env + chain selection
+│   ├── utils.ts                      # Aztec wallet/token helpers
+│   ├── bridge.ts                     # AztecToEvmBridge (forward only)
+│   ├── server.ts                     # Express server (4 endpoints)
+│   ├── intent-client.ts              # SDK: credential, proving, submission, flow builders
+│   ├── test-intent.ts                # headless end-to-end test
+│   └── test-circuit.ts               # proof-pipeline sanity check
+├── .env.localnet / .env.production / .env.example
+├── tsconfig.json
+└── package.json
+```

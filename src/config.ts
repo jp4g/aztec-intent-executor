@@ -5,8 +5,6 @@
  * production:  Aztec devnet + Base Sepolia
  */
 
-import { privateKeyToAccount } from "viem/accounts";
-
 export const AZTEC_ENV = process.env.AZTEC_ENV || 'localnet';
 export const IS_PRODUCTION = AZTEC_ENV === 'production';
 export const IS_LOCALNET = AZTEC_ENV === 'localnet';
@@ -35,12 +33,6 @@ export async function getViemChain() {
   return foundry;
 }
 
-// Demo EVM account — derived from private key in env
-export const DEMO_EVM_PRIVATE_KEY = process.env.DEMO_EVM_PRIVATE_KEY as `0x${string}` | undefined;
-export const DEMO_EVM_ADDRESS = DEMO_EVM_PRIVATE_KEY
-  ? privateKeyToAccount(DEMO_EVM_PRIVATE_KEY).address
-  : undefined;
-
 export function logConfig(): void {
   console.log('='.repeat(60));
   console.log('Aztec Private Intent Bridge - Configuration');
@@ -50,7 +42,6 @@ export function logConfig(): void {
   console.log(`EVM RPC URL: ${EVM_RPC_URL}`);
   console.log(`EVM Chain: ${EVM_CHAIN_NAME}`);
   console.log(`Sponsored FPC: ${SPONSORED_FPC_ADDRESS}`);
-  console.log(`Demo EVM Address: ${DEMO_EVM_ADDRESS || 'not configured'}`);
   console.log(`Prover enabled: ${IS_PRODUCTION}`);
   console.log('='.repeat(60));
 }

@@ -105,7 +105,7 @@ export async function getBalance(tokenAddress: string, ownerAddress: string): Pr
   const token = await TokenContract.at(AztecAddress.fromString(tokenAddress), wallet);
   const owner = AztecAddress.fromString(ownerAddress);
 
-  const balance = await token.methods.balance_of_private(owner).simulate({ from: owner });
+  const { result: balance } = await token.methods.balance_of_private(owner).simulate({ from: owner });
   return balance;
 }
 

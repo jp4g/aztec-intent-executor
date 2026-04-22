@@ -375,7 +375,7 @@ export class AztecToEvmBridge {
 
   private async checkPrivateBalance(address: AztecAddress): Promise<bigint> {
     try {
-      const balance = await this.token.methods
+      const { result: balance } = await this.token.methods
         .balance_of_private(address)
         .simulate({ from: address });
       return balance;

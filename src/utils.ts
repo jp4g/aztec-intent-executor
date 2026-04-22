@@ -3,6 +3,7 @@ import { Fr } from "@aztec/aztec.js/fields";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { EmbeddedWallet } from "@aztec/wallets/embedded";
 import { type AccountManager } from "@aztec/aztec.js/wallet";
+import { NO_FROM } from "@aztec/aztec.js/account";
 import { TokenContract } from "@defi-wonderland/aztec-standards/artifacts/src/artifacts/Token.js";
 import { AZTEC_NODE_URL, SPONSORED_FPC_ADDRESS, IS_PRODUCTION } from "./config.js";
 
@@ -58,7 +59,7 @@ export async function deployAccount(accountManager: AccountManager, fpcAddress?:
   }
 
   const deployMethod = await accountManager.getDeployMethod();
-  await deployMethod.send({ from: AztecAddress.ZERO, fee: { paymentMethod } });
+  await deployMethod.send({ from: NO_FROM, fee: { paymentMethod } });
   console.log(`[Utils] Account deployed: ${accountManager.address.toString()}`);
 }
 
@@ -74,16 +75,15 @@ export async function deployToken(
   fpcAddress?: string
 ): Promise<TokenContract> {
   const paymentMethod = await getSponsoredPaymentMethod(fpcAddress);
-  const token = await TokenContract.deployWithOpts(
+  const deployed = await TokenContract.deployWithOpts(
     { wallet, method: "constructor_with_minter" },
     name,
     symbol,
     decimals,
     admin, // minter
-    admin  // upgrade_authority
   )
     .send({ from: admin, ...(paymentMethod ? { fee: { paymentMethod } } : {}) });
-  return token;
+  return deployed.contract;
 }
 
 /**
@@ -124,7 +124,8 @@ export async function getPrivateBalance(
   address: AztecAddress,
   from: AztecAddress
 ): Promise<bigint> {
-  return await token.methods.balance_of_private(address).simulate({ from });
+  const { result } = await token.methods.balance_of_private(address).simulate({ from });
+  return result;
 }
 
 /**

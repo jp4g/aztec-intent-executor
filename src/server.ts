@@ -71,7 +71,7 @@ async function fundFPCWithFeeJuice(
   const { FeeJuiceContract } = await import('@aztec/aztec.js/protocol');
   const feeJuice = FeeJuiceContract.at(wallet);
 
-  const balance = await feeJuice.methods.balance_of_public(fpcAddress).simulate({ from: feePayerAddress });
+  const { result: balance } = await feeJuice.methods.balance_of_public(fpcAddress).simulate({ from: feePayerAddress });
   if (balance > 0n) {
     console.log(`[Server] SponsoredFPC already has ${balance} fee juice, skipping funding`);
     return;

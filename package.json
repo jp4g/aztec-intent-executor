@@ -14,6 +14,7 @@
     "evm:build": "cd evm && forge build",
     "evm:deploy": "cd evm && forge script script/Deploy.s.sol --rpc-url http://localhost:8545 --broadcast --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 --ffi",
     "evm:deploy:intent": "cd evm && forge script script/DeployIntent.s.sol --rpc-url http://localhost:8545 --broadcast --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 --ffi --disable-code-size-limit",
+    "evm:deploy:mocks": "cd evm && forge script script/DeployMocks.s.sol --rpc-url http://localhost:8545 --broadcast --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 --ffi",
     "evm:deploy:base-sepolia": "source .env.production && cd evm && forge script script/Deploy.s.sol --rpc-url $EVM_RPC_URL --broadcast --private-key $EVM_PRIVATE_KEY --ffi",
     "evm:deploy:intent:base-sepolia": "source .env.production && cd evm && forge script script/DeployIntent.s.sol --rpc-url $EVM_RPC_URL --broadcast --private-key $EVM_PRIVATE_KEY --ffi",
     "noir:build": "cd circuits/intent && $HOME/.nargo/bin/nargo compile && bb write_vk -b target/intent.json -o target/vk -t evm && bb write_solidity_verifier -k target/vk/vk -o ../../evm/src/IntentVerifier.sol -t evm",

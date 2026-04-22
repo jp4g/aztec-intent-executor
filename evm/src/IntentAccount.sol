@@ -4,15 +4,22 @@ pragma solidity ^0.8.27;
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {IVerifier} from "./IntentVerifier.sol";
 
+/// @notice Single call within a batched intent execution.
+struct Call {
+    address target;
+    uint256 value;
+    bytes   data;
+}
+
 /**
  * @title IntentAccount
  * @notice Smart-account clone deployed deterministically per Poseidon2 salt.
- *         Any EVM call can be executed *as* this account by supplying a Noir
- *         proof of knowledge of the salt's preimage, bound to the exact action
- *         via a sha256 commitment.
+ *         Arbitrary batches of EVM calls can be executed *as* this account by
+ *         supplying a Noir proof of knowledge of the salt's preimage, bound to
+ *         the exact batch via a sha256 commitment.
  *
- *         Reusable: multiple distinct actions under the same salt, each gated by
- *         its own proof and single-use nullifier.
+ *         Reusable: multiple distinct batches under the same salt, each gated
+ *         by its own proof and single-use nullifier.
  */
 contract IntentAccount is Initializable {
     /// @notice Poseidon2 hash of the user's preimage. Equal to the CREATE2 salt.
@@ -24,11 +31,12 @@ contract IntentAccount is Initializable {
     /// @notice Nullifiers spent by prior executions; replay-proof.
     mapping(bytes32 => bool) public nullified;
 
-    event Executed(address indexed target, bytes32 indexed nullifier, uint256 value);
+    event ExecutedBatch(bytes32 indexed nullifier, uint256 callCount);
 
     error Replay(bytes32 nullifier);
     error InvalidProof();
-    error CallFailed(bytes returnData);
+    error CallFailed(uint256 index, bytes returnData);
+    error EmptyBatch();
 
     /// @dev Clones are created uninitialized; factory calls initialize() right after.
     function initialize(bytes32 _salt, address _verifier) external initializer {
@@ -37,28 +45,31 @@ contract IntentAccount is Initializable {
     }
 
     /**
-     * @notice Verify a proof and execute an arbitrary call as this account.
-     * @param target     Callee address.
-     * @param value      ETH value forwarded.
-     * @param data       Calldata to forward.
-     * @param nullifier  Caller-chosen bytes32 uniquely identifying this action.
-     *                   Any value works; reusing one reverts with Replay.
-     * @param proof      UltraHonk proof. Public inputs are
-     *                   [salt, action_hash_hi, action_hash_lo] where action_hash
-     *                   is sha256(chainid, address(this), target, value, data, nullifier).
+     * @notice Verify one proof and execute a batch of calls as this account.
+     *
+     *         Every `calls[i]` runs in order. Any single failure reverts the
+     *         whole batch, preserving atomicity (e.g. approve + swap cannot
+     *         desync). `nullifier` is single-use across the account.
+     *
+     *         Public inputs to the verifier are
+     *         `[salt, action_hash_hi, action_hash_lo]` where `action_hash` is
+     *         `sha256(abi.encode(chainid, address(this), calls, nullifier))`.
+     *
+     * @param  calls      Ordered calls to execute.
+     * @param  nullifier  Caller-chosen bytes32 uniquely identifying this batch.
+     * @param  proof      UltraHonk proof bound to the batch.
      */
-    function execute(
-        address target,
-        uint256 value,
-        bytes calldata data,
+    function executeBatch(
+        Call[] calldata calls,
         bytes32 nullifier,
         bytes calldata proof
-    ) external returns (bytes memory) {
+    ) external returns (bytes[] memory returnData) {
+        if (calls.length == 0) revert EmptyBatch();
         if (nullified[nullifier]) revert Replay(nullifier);
         nullified[nullifier] = true;
 
         bytes32 actionHash = sha256(
-            abi.encode(block.chainid, address(this), target, value, data, nullifier)
+            abi.encode(block.chainid, address(this), calls, nullifier)
         );
 
         bytes32[] memory pubInputs = new bytes32[](3);
@@ -67,11 +78,14 @@ contract IntentAccount is Initializable {
 
         if (!verifier.verify(proof, pubInputs)) revert InvalidProof();
 
-        (bool ok, bytes memory ret) = target.call{value: value}(data);
-        if (!ok) revert CallFailed(ret);
+        returnData = new bytes[](calls.length);
+        for (uint256 i; i < calls.length; ++i) {
+            (bool ok, bytes memory ret) = calls[i].target.call{value: calls[i].value}(calls[i].data);
+            if (!ok) revert CallFailed(i, ret);
+            returnData[i] = ret;
+        }
 
-        emit Executed(target, nullifier, value);
-        return ret;
+        emit ExecutedBatch(nullifier, calls.length);
     }
 
     /// @dev Split a bytes32 into two bytes32 values, each holding 16 bytes in

@@ -61,6 +61,7 @@ aztec start --local-network # must match the @aztec/* SDK version in package.jso
 yarn evm:deploy
 
 # 3. (Optional — only needed for the intent executor demo)
+yarn evm:deploy:mocks       # swap router, lending vault, second ERC20
 yarn evm:deploy:intent
 
 # 4. Start the bridge server
@@ -165,6 +166,7 @@ Open `http://localhost:5173`.
 | `yarn build` | Production webpack build |
 | `yarn evm:deploy` | Deploy bUSDC to Anvil |
 | `yarn evm:deploy:base-sepolia` | Deploy bUSDC to Base Sepolia |
+| `yarn evm:deploy:mocks` | Deploy MockTokenB + MockSwapRouter (seeded) + MockLendingVault |
 | `yarn evm:deploy:intent` | Deploy IntentVerifier + IntentAccount impl + factory to Anvil |
 | `yarn evm:deploy:intent:base-sepolia` | Same, against Base Sepolia |
 | `yarn evm:build` | Compile Solidity contracts |
@@ -211,14 +213,16 @@ A non-custodial executor layer on top of the token bridge. Bridged bUSDC lands a
 1. Client generates random preimage, computes salt = Poseidon2(preimage)
 2. Client derives intentAddr = Clones.predictDeterministicAddress(impl, salt, factory)
 3. Client bridges bUSDC from Aztec to intentAddr (unchanged forward bridge)
-4. Client builds (target, value, data, nullifier); computes
-   actionHash = sha256(chainid, intentAddr, target, value, data, nullifier)
-5. Client generates Noir proof with public inputs [salt, actionHashHi, actionHashLo]
-6. Anyone calls factory.deployAndExecute(salt, target, value, data, nullifier, proof)
+4. Client builds Call[] (one or more (target, value, data) tuples) + a nullifier;
+   actionHash = sha256(abi.encode(chainid, intentAddr, calls, nullifier))
+5. Client generates one Noir proof with public inputs [salt, actionHashHi, actionHashLo]
+6. Anyone calls factory.deployAndExecuteBatch(salt, calls, nullifier, proof)
    – deploys the EIP-1167 clone if not yet deployed
-   – IntentAccount.execute verifies the proof, re-hashes the action, enforces
-     the nullifier, and runs the call as itself
+   – IntentAccount.executeBatch verifies the proof, re-hashes the batch, enforces
+     the nullifier, and runs every call as itself (atomic — any failure reverts all)
 ```
+
+**One proof per batch.** `Call = (address target, uint256 value, bytes data)`. The circuit doesn't care what's inside the batch — it only sees the 256-bit action hash split into two field halves — so arbitrary N-call flows all prove in identical time.
 
 ### Components
 
@@ -226,10 +230,28 @@ A non-custodial executor layer on top of the token bridge. Bridged bUSDC lands a
 |---|---|
 | `circuits/intent/src/main.nr` | `Poseidon2(preimage) == salt`; `actionHash` bound as public input |
 | `evm/src/IntentVerifier.sol` | UltraHonk verifier generated from the circuit's VK |
-| `evm/src/IntentAccount.sol` | Per-salt EIP-1167 clone with `execute(..., proof)` and nullifier map |
-| `evm/src/IntentAccountFactory.sol` | Deterministic deployer + `deployAndExecute` wrapper |
-| `evm/script/DeployIntent.s.sol` | Forge script that wires verifier → impl → factory |
-| `src/test-intent.ts` | Headless end-to-end test (bridge + prove + execute + replay) |
+| `evm/src/IntentAccount.sol` | Per-salt EIP-1167 clone with `executeBatch(Call[], nullifier, proof)` and nullifier map |
+| `evm/src/IntentAccountFactory.sol` | Deterministic deployer + `deployAndExecuteBatch` wrapper |
+| `evm/src/MockTokenB.sol` | 18-dec ERC20 used as the swap counterparty in flow tests |
+| `evm/src/MockSwapRouter.sol` | Fixed-rate two-token AMM; seeded with reserves at deploy |
+| `evm/src/MockLendingVault.sol` | Minimal ERC4626-ish vault over bUSDC; shares 1:1, no yield |
+| `evm/script/DeployIntent.s.sol` | Deploys verifier → impl → factory |
+| `evm/script/DeployMocks.s.sol` | Deploys + seeds the three mock targets |
+| `src/intent-client.ts` | SDK: credential gen, action-hash, proving, submission, typed flow builders |
+| `src/test-intent.ts` | Headless end-to-end test (transfer + swap + vault deposit/withdraw + replay) |
+
+### Flow builders (`src/intent-client.ts`)
+
+Typed helpers that build the `Call[]` for each scenario. Each flow is one batch, one proof.
+
+| Builder | Calls | Notes |
+|---|---|---|
+| `transferFlow(token, to, amount)` | 1 | ERC20 transfer |
+| `swapAndSendFlow({ router, tokenIn, tokenOut, amountIn, minAmountOut, recipient })` | 2 | `approve(router)` + `swapExactTokensForTokens(…, recipient)` — atomic |
+| `vaultDepositFlow({ vault, asset, amount, receiver })` | 2 | `approve(vault)` + `deposit(amount, receiver)` |
+| `vaultWithdrawFlow({ vault, shares, receiver, owner })` | 1 | `redeem(shares, receiver, owner)` |
+
+ERC-2612 permit doesn't help replace `approve` here: the caller is the `IntentAccount` (a contract) which can't produce ECDSA signatures. EIP-1271 contract signatures would work but would add circuit surface — the batched proof is the cleaner primitive.
 
 ### Rebuilding the circuit and verifier
 
@@ -255,13 +277,16 @@ With Anvil, the Aztec sandbox, and the bridge server running:
 
 ```bash
 yarn evm:deploy           # bUSDC
+yarn evm:deploy:mocks     # MockTokenB + MockSwapRouter (seeded) + MockLendingVault
 yarn evm:deploy:intent    # verifier + impl + factory
-yarn test:intent          # bridge 100 bUSDC, prove two distinct actions, assert replay reverts
+yarn test:intent          # transfer, swap-and-send, vault deposit, vault withdraw, replay-reverts
 ```
+
+The test bridges 100 bUSDC into a fresh intent account and runs all four flows against it — one nullifier per flow, all five assertions green.
 
 ### Caveats
 
 - The circuit's `verifier` is immutable per intent account (set at init); evolving the circuit strands old accounts on old verifier bytecode. Fine for a demo; flag for prod.
 - Nullifier is a user-chosen `bytes32`. Reuse reverts, so losing track of used nullifiers just wastes a tx — funds stay recoverable. Losing the preimage permanently locks the account.
-- First use of an intent account is typically `approve` then `transfer` — two actions, two proofs. A batched `execute[]` would save a tx; not implemented.
+- `MockLendingVault.redeem` requires `owner == msg.sender` (no ERC20 allowance machinery), so you can only redeem into your own intent account via a single-call batch. Real ERC4626 vaults typically accept an allowance-granted caller.
 

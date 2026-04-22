@@ -2,7 +2,7 @@
 pragma solidity ^0.8.27;
 
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
-import {IntentAccount} from "./IntentAccount.sol";
+import {IntentAccount, Call} from "./IntentAccount.sol";
 
 /**
  * @title IntentAccountFactory
@@ -41,19 +41,17 @@ contract IntentAccountFactory {
         emit IntentAccountDeployed(account, salt);
     }
 
-    /// @notice Deploy (if needed) and execute an intent action in one tx.
-    function deployAndExecute(
+    /// @notice Deploy (if needed) and execute an intent batch in one tx.
+    function deployAndExecuteBatch(
         bytes32 salt,
-        address target,
-        uint256 value,
-        bytes calldata data,
+        Call[] calldata calls,
         bytes32 nullifier,
         bytes calldata proof
-    ) external returns (bytes memory) {
+    ) external returns (bytes[] memory) {
         address predicted = implementation.predictDeterministicAddress(salt, address(this));
         if (predicted.code.length == 0) {
             deploy(salt);
         }
-        return IntentAccount(payable(predicted)).execute(target, value, data, nullifier, proof);
+        return IntentAccount(payable(predicted)).executeBatch(calls, nullifier, proof);
     }
 }

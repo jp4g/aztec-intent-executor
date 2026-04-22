@@ -10,6 +10,7 @@ evm/broadcast/
 evm-deployment.json
 deployment.json
 intent-deployment.json
+mocks-deployment.json
 circuits/intent/target/
 
 pxe_data_*

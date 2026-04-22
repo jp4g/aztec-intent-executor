@@ -97,7 +97,7 @@ Then `yarn evm:deploy:base-sepolia`, set `EVM_TOKEN_ADDRESS` in `.env.production
 | `evm/src/MockLendingVault.sol` | Minimal ERC4626-ish single-asset vault, shares 1:1, no yield |
 | `src/intent-client.ts` | SDK: credential gen, action-hash, proving, submission, typed flow builders |
 | `src/test-intent.ts` | Headless end-to-end test |
-| `src/bridge.ts` + `src/server.ts` | Forward-only bridge: `/api/bridge/initiate`, `/api/bridge/status/:addr`, `/api/test/transfer-private`, `/api/health` |
+| `src/bridge.ts` + `src/server.ts` | Bidirectional bridge: forward (`/api/bridge/initiate`, `/api/bridge/status/:addr`) + reverse (`/api/bridge/evm-to-aztec`, `/api/bridge/evm-to-aztec/status/:id`) |
 
 ### Flow
 
@@ -165,14 +165,14 @@ The `HonkVerifier` runtime bytecode is ~33.8 KB, over EIP-170. `yarn anvil` pass
 
 ## API (server)
 
-Only four endpoints — everything else that was here (faucet, reverse bridge, demo transfer) was stripped.
-
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/health` | GET | Server status, Aztec + EVM token addresses |
-| `/api/bridge/initiate` | POST | Create Aztec→EVM bridge session for a given EVM destination |
-| `/api/bridge/status/:aztecAddress` | GET | Poll a bridge session by its Aztec deposit address |
-| `/api/test/transfer-private` | POST | Test helper: mint private USDC directly to an Aztec address |
+| `/api/health` | GET | Server status, Aztec + EVM token addresses, both bridge states |
+| `/api/bridge/initiate` | POST | Start an Aztec→EVM forward bridge session targeting any EVM address (including a counterfactual intent account) |
+| `/api/bridge/status/:aztecAddress` | GET | Poll a forward bridge session by its Aztec deposit address |
+| `/api/bridge/evm-to-aztec` | POST | Start an EVM→Aztec reverse bridge session — used when an intent batch wants proceeds delivered back privately to an Aztec address |
+| `/api/bridge/evm-to-aztec/status/:sessionId` | GET | Poll a reverse bridge session |
+| `/api/test/transfer-private` | POST | Test helper — mint private USDC directly to an Aztec address |
 
 ## Environment variables
 

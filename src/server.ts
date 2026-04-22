@@ -7,7 +7,7 @@ import { fileURLToPath } from "url";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { TokenContract } from "@defi-wonderland/aztec-standards/artifacts/src/artifacts/Token.js";
 import { setupSandbox, getTestWallet, deployToken, deployAccount } from "./utils.js";
-import { AztecToEvmBridge } from "./bridge.js";
+import { AztecToEvmBridge, EvmToAztecBridge } from "./bridge.js";
 import { AZTEC_NODE_URL, EVM_RPC_URL, EVM_CHAIN_NAME, SPONSORED_FPC_ADDRESS, IS_PRODUCTION, AZTEC_ENV, logConfig, getViemChain } from "./config.js";
 import type { EmbeddedWallet } from "@aztec/wallets/embedded";
 import type { AztecNode } from "@aztec/aztec.js/node";
@@ -44,6 +44,7 @@ let wallet: EmbeddedWallet;
 let token: TokenContract;
 let minterAddress: AztecAddress;
 let bridge: AztecToEvmBridge | null = null;
+let reverseBridge: EvmToAztecBridge | null = null;
 let isInitialized = false;
 let activeFpcAddress: string = SPONSORED_FPC_ADDRESS;
 
@@ -161,9 +162,14 @@ async function initialize() {
     console.log(`  EVM RPC: ${EVM_RPC_URL}`);
     bridge = new AztecToEvmBridge(wallet, token, EVM_TOKEN_ADDRESS, EVM_PRIVATE_KEY, EVM_RPC_URL);
     await bridge.start();
-    console.log(`[Server] Bridge initialized with EVM token at ${EVM_TOKEN_ADDRESS}`);
+    console.log(`[Server] Forward bridge initialized with EVM token at ${EVM_TOKEN_ADDRESS}`);
+
+    console.log("[Server] Initializing EVM -> Aztec reverse bridge...");
+    reverseBridge = new EvmToAztecBridge(wallet, token, minterAddress, activeFpcAddress, EVM_TOKEN_ADDRESS, EVM_PRIVATE_KEY, EVM_RPC_URL);
+    await reverseBridge.start();
+    console.log(`[Server] Reverse bridge initialized; deposit address = ${reverseBridge.getDepositAddress()}`);
   } else {
-    console.log("[Server] Bridge disabled - set EVM_TOKEN_ADDRESS and EVM_PRIVATE_KEY to enable");
+    console.log("[Server] Bridges disabled - set EVM_TOKEN_ADDRESS and EVM_PRIVATE_KEY to enable");
   }
 
   isInitialized = true;
@@ -229,6 +235,56 @@ app.get("/api/bridge/status/:aztecAddress", (req, res) => {
   });
 });
 
+// Initiate an EVM -> Aztec reverse bridge session. User sends `amount` bUSDC
+// to the deposit address; once detected, the server mints private USDC on
+// Aztec to `aztecAddress`. Used when the intent executor wants to send
+// proceeds back to Aztec for privacy.
+app.post("/api/bridge/evm-to-aztec", async (req, res) => {
+  if (!isInitialized) return res.status(503).json({ error: "Server is still initializing, please wait..." });
+  if (!reverseBridge) return res.status(503).json({ error: "Reverse bridge is not enabled. Set EVM_TOKEN_ADDRESS env var." });
+
+  try {
+    const { aztecAddress, amount } = req.body;
+    if (!aztecAddress || !amount) return res.status(400).json({ error: "aztecAddress and amount are required" });
+
+    const amountBigInt = BigInt(amount);
+    console.log(`[ReverseBridge] Initiating bridge for Aztec address ${aztecAddress}, amount: ${amountBigInt}`);
+    const session = reverseBridge.createSession(aztecAddress, amountBigInt);
+
+    res.json({
+      success: true,
+      sessionId: session.sessionId,
+      depositAddress: session.depositAddress,
+      expiresAt: session.expiresAt,
+      message: `Send ${amountBigInt} bUSDC to ${session.depositAddress} within 5 minutes`,
+    });
+  } catch (error) {
+    console.error("Error initiating reverse bridge:", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: `Failed to initiate reverse bridge: ${errorMessage}` });
+  }
+});
+
+// Poll status for a reverse bridge session by its session ID.
+app.get("/api/bridge/evm-to-aztec/status/:sessionId", (req, res) => {
+  if (!reverseBridge) return res.status(503).json({ error: "Reverse bridge is not enabled" });
+
+  const { sessionId } = req.params;
+  const session = reverseBridge.getSession(sessionId);
+
+  if (!session) {
+    return res.json({ status: "not_found", message: "Session not found or expired" });
+  }
+
+  res.json({
+    status: session.status,
+    aztecAddress: session.aztecAddress.toString(),
+    amount: session.amount.toString(),
+    expiresAt: session.expiresAt,
+    remainingTime: Math.max(0, session.expiresAt - Date.now()),
+  });
+});
+
 // Test helper — mint private USDC directly to an Aztec address. Used by
 // test-intent.ts to populate a bridge deposit address; not a user-facing API.
 app.post("/api/test/transfer-private", async (req, res) => {
@@ -266,6 +322,9 @@ app.get("/api/health", async (_req, res) => {
     evmTokenAddress: EVM_TOKEN_ADDRESS || null,
     sponsoredFpcAddress: activeFpcAddress,
     activeBridgeSessions: bridge?.getActiveSessionsCount() || 0,
+    reverseBridgeEnabled: !!reverseBridge,
+    reverseBridgeDepositAddress: reverseBridge?.getDepositAddress() || null,
+    activeReverseBridgeSessions: reverseBridge?.getActiveSessionsCount() || 0,
     serverStartupTimestamp: SERVER_STARTUP_TIMESTAMP,
     environment: AZTEC_ENV,
     isProduction: IS_PRODUCTION,
@@ -284,10 +343,12 @@ app.listen(PORT, () => {
     .then(() => {
       console.log("[Server] Fully initialized and ready!");
       console.log("Endpoints:");
-      console.log("  POST /api/bridge/initiate            - Start Aztec->EVM bridge");
-      console.log("  GET  /api/bridge/status/:aztecAddress - Poll bridge session status");
-      console.log("  POST /api/test/transfer-private      - Server-side private mint (test helper)");
-      console.log("  GET  /api/health                     - Server health + addresses");
+      console.log("  POST /api/bridge/initiate                    - Start Aztec->EVM bridge");
+      console.log("  GET  /api/bridge/status/:aztecAddress        - Poll Aztec->EVM session status");
+      console.log("  POST /api/bridge/evm-to-aztec                - Start EVM->Aztec reverse bridge");
+      console.log("  GET  /api/bridge/evm-to-aztec/status/:id     - Poll reverse bridge session");
+      console.log("  POST /api/test/transfer-private              - Server-side private mint (test helper)");
+      console.log("  GET  /api/health                             - Server health + addresses");
     })
     .catch((err) => {
       console.error("[Server] Failed to initialize:", err?.message || err);

@@ -25,6 +25,182 @@ const BRIDGED_USDC_ABI = parseAbi([
   "function balanceOf(address account) external view returns (uint256)",
 ]);
 
+interface ReverseBridgeSession {
+  id: string;
+  aztecAddress: AztecAddress;
+  amount: bigint;
+  status: "pending" | "processing" | "completed" | "expired";
+  createdAt: number;
+  expiresAt: number;
+}
+
+export class EvmToAztecBridge {
+  private sessions: Map<string, ReverseBridgeSession> = new Map();
+  private wallet: EmbeddedWallet;
+  private token: TokenContract;
+  private minterAddress: AztecAddress;
+  private fpcAddress: string;
+  private evmTokenAddress: `0x${string}`;
+  private evmRpcUrl: string;
+  private bridgeWalletAddress: `0x${string}`;
+  private lastKnownBalance: bigint = 0n;
+  private pollInterval: NodeJS.Timeout | null = null;
+  private sessionCounter = 0;
+
+  constructor(
+    wallet: EmbeddedWallet,
+    token: TokenContract,
+    minterAddress: AztecAddress,
+    fpcAddress: string,
+    evmTokenAddress: string,
+    evmPrivateKey: string,
+    evmRpcUrl: string = "http://localhost:8545"
+  ) {
+    this.wallet = wallet;
+    this.token = token;
+    this.minterAddress = minterAddress;
+    this.fpcAddress = fpcAddress;
+    this.evmTokenAddress = evmTokenAddress as `0x${string}`;
+    this.evmRpcUrl = evmRpcUrl;
+
+    const account = privateKeyToAccount(evmPrivateKey as `0x${string}`);
+    this.bridgeWalletAddress = account.address;
+  }
+
+  async start() {
+    console.log("[ReverseBridge] Starting EVM -> Aztec bridge service...");
+    console.log(`[ReverseBridge] Bridge wallet (EVM): ${this.bridgeWalletAddress}`);
+
+    // Initialize lastKnownBalance
+    this.lastKnownBalance = await this.getEvmBalance();
+    console.log(`[ReverseBridge] Initial bridge wallet bUSDC balance: ${this.lastKnownBalance}`);
+
+    this.pollInterval = setInterval(() => this.pollEvmBalance(), POLL_INTERVAL);
+  }
+
+  stop() {
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval);
+      this.pollInterval = null;
+    }
+  }
+
+  createSession(aztecAddress: string, amount: bigint): {
+    sessionId: string;
+    depositAddress: string;
+    expiresAt: number;
+  } {
+    const now = Date.now();
+    const id = `evm-to-aztec-${++this.sessionCounter}`;
+
+    const session: ReverseBridgeSession = {
+      id,
+      aztecAddress: AztecAddress.fromString(aztecAddress),
+      amount,
+      status: "pending",
+      createdAt: now,
+      expiresAt: now + BRIDGE_SESSION_TIMEOUT,
+    };
+
+    this.sessions.set(id, session);
+
+    console.log(`[ReverseBridge] Created session ${id}`);
+    console.log(`[ReverseBridge]   Aztec recipient: ${aztecAddress}`);
+    console.log(`[ReverseBridge]   Amount: ${amount}`);
+    console.log(`[ReverseBridge]   Deposit to: ${this.bridgeWalletAddress}`);
+    console.log(`[ReverseBridge]   Expires at: ${new Date(session.expiresAt).toISOString()}`);
+
+    return {
+      sessionId: id,
+      depositAddress: this.bridgeWalletAddress,
+      expiresAt: session.expiresAt,
+    };
+  }
+
+  private async getEvmBalance(): Promise<bigint> {
+    const chain = await getViemChain();
+    const publicClient = createPublicClient({
+      chain,
+      transport: http(this.evmRpcUrl),
+    });
+
+    try {
+      const balance = await publicClient.readContract({
+        address: this.evmTokenAddress,
+        abi: BRIDGED_USDC_ABI,
+        functionName: "balanceOf",
+        args: [this.bridgeWalletAddress],
+      });
+      return balance as bigint;
+    } catch (error) {
+      console.error("[ReverseBridge] Error reading EVM balance:", error);
+      return this.lastKnownBalance;
+    }
+  }
+
+  private async pollEvmBalance() {
+    const now = Date.now();
+
+    // Clean up expired sessions
+    for (const [id, session] of this.sessions.entries()) {
+      if (session.status === "pending" && now > session.expiresAt) {
+        console.log(`[ReverseBridge] Session ${id} expired`);
+        session.status = "expired";
+        this.sessions.delete(id);
+      }
+    }
+
+    // Check for pending sessions
+    const pendingSessions = [...this.sessions.values()].filter(s => s.status === "pending");
+    if (pendingSessions.length === 0) return;
+
+    try {
+      const currentBalance = await this.getEvmBalance();
+      const increase = currentBalance - this.lastKnownBalance;
+
+      if (increase > 0n) {
+        console.log(`[ReverseBridge] Detected balance increase of ${increase} bUSDC`);
+
+        // Match against pending sessions by amount
+        const matched = pendingSessions.find(s => s.amount === increase);
+        if (matched) {
+          console.log(`[ReverseBridge] Matched session ${matched.id} (amount: ${matched.amount})`);
+          matched.status = "processing";
+          this.lastKnownBalance = currentBalance;
+
+          try {
+            const { mintTokensPrivate } = await import("./utils.js");
+            console.log(`[ReverseBridge] Minting ${matched.amount} USDC privately to ${matched.aztecAddress.toString()}...`);
+            await mintTokensPrivate(this.token, this.minterAddress, matched.aztecAddress, matched.amount, this.fpcAddress);
+
+            matched.status = "completed";
+            console.log(`[ReverseBridge] Session ${matched.id} completed!`);
+          } catch (error) {
+            console.error(`[ReverseBridge] Failed to mint on Aztec for session ${matched.id}:`, error);
+            matched.status = "pending"; // Allow retry
+          }
+        } else {
+          console.log(`[ReverseBridge] No matching session for amount ${increase}`);
+          this.lastKnownBalance = currentBalance;
+        }
+      }
+    } catch (error) {
+      console.error("[ReverseBridge] Error polling EVM balance:", error);
+    }
+  }
+
+  getSession(sessionId: string): ReverseBridgeSession | undefined {
+    return this.sessions.get(sessionId);
+  }
+
+  getActiveSessionsCount(): number {
+    return [...this.sessions.values()].filter(s => s.status === "pending" || s.status === "processing").length;
+  }
+
+  getDepositAddress(): string {
+    return this.bridgeWalletAddress;
+  }
+}
 
 export class AztecToEvmBridge {
   private sessions: Map<string, BridgeSession> = new Map();

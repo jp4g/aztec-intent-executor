@@ -85,6 +85,9 @@ interface MocksDeployment {
 interface Health {
   evmTokenAddress: Hex;
   bridgeEnabled: boolean;
+  reverseBridgeEnabled: boolean;
+  reverseBridgeDepositAddress: Hex | null;
+  minterAddress: string | null;
 }
 
 function section(title: string) {
@@ -105,8 +108,48 @@ async function getHealth(): Promise<Health> {
   const res = await fetch(`${SERVER_URL}/api/health`);
   const data = await res.json();
   if (data.status !== "ok") throw new Error("Server not ready");
-  if (!data.bridgeEnabled) throw new Error("Bridge not enabled on server");
-  return { evmTokenAddress: data.evmTokenAddress, bridgeEnabled: data.bridgeEnabled };
+  if (!data.bridgeEnabled) throw new Error("Forward bridge not enabled on server");
+  if (!data.reverseBridgeEnabled) throw new Error("Reverse bridge not enabled on server");
+  return {
+    evmTokenAddress: data.evmTokenAddress,
+    bridgeEnabled: data.bridgeEnabled,
+    reverseBridgeEnabled: data.reverseBridgeEnabled,
+    reverseBridgeDepositAddress: data.reverseBridgeDepositAddress,
+    minterAddress: data.minterAddress,
+  };
+}
+
+async function initiateReverseBridge(params: {
+  aztecAddress: string;
+  amount: bigint;
+}): Promise<{ sessionId: string; depositAddress: Hex }> {
+  const res = await fetch(`${SERVER_URL}/api/bridge/evm-to-aztec`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ aztecAddress: params.aztecAddress, amount: params.amount.toString() }),
+  });
+  const data = await res.json();
+  if (!data.success) throw new Error(`reverse bridge initiate failed: ${JSON.stringify(data)}`);
+  return { sessionId: data.sessionId, depositAddress: data.depositAddress };
+}
+
+async function pollReverseBridgeUntilCompleted(sessionId: string, timeoutMs = 90_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = "unknown";
+  while (Date.now() < deadline) {
+    const res = await fetch(`${SERVER_URL}/api/bridge/evm-to-aztec/status/${sessionId}`);
+    const data = await res.json();
+    if (data.status !== lastStatus) {
+      log(`reverse bridge session ${sessionId}: ${data.status}`);
+      lastStatus = data.status;
+    }
+    if (data.status === "completed") return;
+    if (data.status === "expired" || data.status === "not_found") {
+      throw new Error(`reverse bridge session ${sessionId} ended as ${data.status}`);
+    }
+    await sleep(2000);
+  }
+  throw new Error(`reverse bridge session ${sessionId} timed out in status "${lastStatus}"`);
 }
 
 function readIntentDeployment(): IntentDeployment {
@@ -373,21 +416,29 @@ async function main() {
   log(`✓ intent vault-shares: 0; intent bUSDC: ${formatUnits(intentBal4, 6)}`);
 
   // ========================================================================
-  // Scenario E: three-tx roundtrip on a FRESH intent account.
+  // Scenario E: three-tx FULL PRIVACY roundtrip on a FRESH intent account.
+  //   Aztec -> EVM -> swap -> lend -> unwind -> EVM -> Aztec (private again)
+  //
   //   tx1: USDC -> WETH (kept in the intent)
   //   tx2: deposit WETH into the WETH vault
-  //   tx3: redeem shares, swap back to USDC, deliver to user EOA
+  //   tx3: redeem + swap back to USDC, deliver to reverse-bridge deposit addr
+  //   (off-chain) reverse bridge detects the deposit and mints private USDC
+  //               on Aztec to a chosen Aztec address.
   // ========================================================================
-  section("E. Roundtrip — new intent account for a USDC→WETH→vault→USDC→EOA flow");
+  section("E. Privacy roundtrip — Aztec -> EVM intent flow -> Aztec");
 
-  const userEoa = EXTERNAL_RECIPIENT;
-  log(`User EOA (final destination): ${userEoa}`);
+  if (!health.reverseBridgeDepositAddress) throw new Error("reverse bridge deposit address missing from /api/health");
+  if (!health.minterAddress) throw new Error("minter address missing from /api/health");
+  log(`Reverse bridge deposit address (EVM): ${health.reverseBridgeDepositAddress}`);
+  log(`Final Aztec recipient (server minter): ${health.minterAddress}`);
+
   const cred2 = await generateCredential(publicClient, intentD.factory);
   log(`preimage: ${cred2.preimage.toString()}`);
   log(`salt:     ${cred2.salt.toString()}`);
   log(`intent:   ${cred2.intentAddress}`);
 
-  const eoaUsdcBefore = await balanceOf(publicClient, health.evmTokenAddress, userEoa);
+  const reverseBridgeWallet = health.reverseBridgeDepositAddress;
+  const bridgeWalletUsdcBefore = await balanceOf(publicClient, health.evmTokenAddress, reverseBridgeWallet);
 
   section("E. Bridge 100 bUSDC to intent #2");
   await bridgeBusdcToAddress(cred2.intentAddress, bridgeAmount);
@@ -447,10 +498,25 @@ async function main() {
   log(`✓ intent WETH: 0; WETH-vault shares: ${formatUnits(e2IntentShares, 18)}`);
 
   // tx3 ------------------------------------------------------------------
-  //   Call order: redeem(shares) -> approve(router, weth) -> swap(WETH->USDC to EOA)
+  //   Prepare the reverse-bridge session FIRST, then submit tx3 whose final
+  //   swap sends exactly `bridgeAmount` bUSDC to the reverse-bridge deposit
+  //   address. The bridge watches its wallet balance and matches the increase
+  //   against the pending session by amount.
+  //
+  //   Call order inside tx3: redeem(shares) -> approve(router) -> swap(WETH->USDC to reverseBridgeWallet)
   //   One proof, three calls, atomic.
-  section("E.tx3 — redeem + swap back to USDC, delivered to user EOA");
+  section("E.tx3 — redeem + swap back to USDC, delivered to reverse bridge");
   const nE3 = ("0x" + "00".repeat(31) + "e3") as Hex;
+
+  log(`Creating reverse-bridge session for ${formatUnits(bridgeAmount, 6)} bUSDC -> ${health.minterAddress}`);
+  const reverseSession = await initiateReverseBridge({
+    aztecAddress: health.minterAddress,
+    amount: bridgeAmount,
+  });
+  log(`reverse bridge sessionId: ${reverseSession.sessionId}`);
+  if (reverseSession.depositAddress.toLowerCase() !== reverseBridgeWallet.toLowerCase()) {
+    throw new Error(`reverse bridge deposit address mismatch: ${reverseSession.depositAddress} vs ${reverseBridgeWallet}`);
+  }
 
   const redeemCall = vaultWithdrawFlow({
     vault: mocks.wethVault,
@@ -462,9 +528,9 @@ async function main() {
     router: mocks.swapRouter,
     tokenIn: mocks.weth,
     tokenOut: health.evmTokenAddress,
-    amountIn: e2IntentShares, // full redeemed amount
-    minAmountOut: (bridgeAmount * 99n) / 100n,
-    recipient: userEoa,
+    amountIn: e2IntentShares,
+    minAmountOut: bridgeAmount, // must land EXACTLY bridgeAmount at the bridge wallet for session match
+    recipient: reverseBridgeWallet,
   });
   const roundtripCalls: Call[] = [...redeemCall, ...swapBackCalls];
 
@@ -482,21 +548,26 @@ async function main() {
   const eFinalIntentUsdc = await balanceOf(publicClient, health.evmTokenAddress, cred2.intentAddress);
   const eFinalIntentWeth = await balanceOf(publicClient, mocks.weth, cred2.intentAddress);
   const eFinalIntentShares = await balanceOf(publicClient, mocks.wethVault, cred2.intentAddress);
-  const eFinalEoaUsdc = await balanceOf(publicClient, health.evmTokenAddress, userEoa);
-  const eoaDelta = eFinalEoaUsdc - eoaUsdcBefore;
+  const bridgeWalletUsdcAfter = await balanceOf(publicClient, health.evmTokenAddress, reverseBridgeWallet);
+  const bridgeDelta = bridgeWalletUsdcAfter - bridgeWalletUsdcBefore;
 
   if (eFinalIntentUsdc !== 0n) throw new Error("intent bUSDC should be 0 after roundtrip");
   if (eFinalIntentWeth !== 0n) throw new Error("intent WETH should be 0 after roundtrip");
   if (eFinalIntentShares !== 0n) throw new Error("intent WETH-vault shares should be 0 after roundtrip");
-  if (eoaDelta !== bridgeAmount) throw new Error(`EOA USDC delta: ${eoaDelta}, expected ${bridgeAmount}`);
+  if (bridgeDelta !== bridgeAmount) throw new Error(`bridge wallet bUSDC delta: ${bridgeDelta}, expected ${bridgeAmount}`);
   log(`✓ intent account drained: bUSDC=0 WETH=0 shares=0`);
-  log(`✓ user EOA received ${formatUnits(eoaDelta, 6)} bUSDC (delta from roundtrip)`);
+  log(`✓ reverse-bridge wallet received ${formatUnits(bridgeDelta, 6)} bUSDC (awaiting Aztec mint)`);
+
+  section("E.tx3' — wait for reverse bridge to mint private USDC on Aztec");
+  await pollReverseBridgeUntilCompleted(reverseSession.sessionId);
+  log(`✓ reverse bridge completed — ${formatUnits(bridgeAmount, 6)} private USDC minted on Aztec to ${health.minterAddress}`);
 
   section("ALL INTENT FLOW TESTS PASSED");
   log(`Scenarios A–D on credential #1: transfer, replay-revert, swap, vault deposit, vault withdraw`);
-  log(`Scenario E on credential #2:     USDC -> WETH -> WETH-vault -> WETH -> USDC -> EOA`);
-  log(`  — three separate batches on the same intent account, three nullifiers, three proofs`);
-  log(`  — 100 bUSDC made the full round trip and was delivered to ${userEoa}`);
+  log(`Scenario E on credential #2:     Aztec -> EVM intent -> swap -> lend -> swap back -> Aztec`);
+  log(`  — three EVM batches on one intent account, three nullifiers, three proofs`);
+  log(`  — 100 bUSDC made the full privacy round trip:`);
+  log(`      private Aztec note -> public EVM swap/lend/unwind -> private Aztec note again`);
 
   await backend.bb.destroy();
   process.exit(0);

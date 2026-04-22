@@ -64,7 +64,13 @@ yarn test:intent
 `test:intent` runs:
 
 1. **Credential #1** — bridge 100 bUSDC, then transfer / replay-revert / swap / vault-deposit / vault-withdraw.
-2. **Credential #2** — bridge 100 bUSDC, then a three-tx roundtrip on one account: USDC→WETH (tx1) → WETH vault deposit (tx2) → redeem + swap back + deliver USDC to an EOA (tx3). Three proofs, three nullifiers, one reusable account.
+2. **Credential #2** — bridge 100 bUSDC, then a full **privacy round-trip** on one account:
+   - tx1: approve + swap USDC → WETH (kept in intent)
+   - tx2: approve + deposit WETH into the WETH vault
+   - tx3: redeem + approve + swap WETH → USDC, recipient = reverse-bridge wallet
+   - off-chain: reverse bridge detects the deposit and mints private USDC back on Aztec
+   
+   Net: private Aztec note → public EVM (swap/lend/unwind) → private Aztec note again. Three EVM batches on one reusable intent account, three distinct nullifiers, three proofs.
 
 ## Production (Aztec devnet + Base Sepolia)
 
@@ -147,7 +153,7 @@ The `HonkVerifier` runtime bytecode is ~33.8 KB, over EIP-170. `yarn anvil` pass
 
 - The verifier is immutable per intent account (set at init); circuit upgrades strand old accounts on old verifier bytecode. Fine for a demo.
 - Nullifier is a user-chosen `bytes32`; accidental reuse just wastes a tx. Losing the preimage permanently locks the account.
-- The bridge operator sees the destination EVM address (the counterfactual `intentAddr`), so the Aztec → EVM hop isn't fully unlinkable yet.
+- The bridge operator sees the destination EVM address (the counterfactual `intentAddr`) and the Aztec side of the reverse bridge, so the round-trip isn't end-to-end unlinkable from the operator's viewpoint. On-chain observers only see the intent account as a create2 address with no direct link to either Aztec endpoint.
 
 ## Scripts
 

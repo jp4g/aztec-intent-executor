@@ -232,9 +232,9 @@ A non-custodial executor layer on top of the token bridge. Bridged bUSDC lands a
 | `evm/src/IntentVerifier.sol` | UltraHonk verifier generated from the circuit's VK |
 | `evm/src/IntentAccount.sol` | Per-salt EIP-1167 clone with `executeBatch(Call[], nullifier, proof)` and nullifier map |
 | `evm/src/IntentAccountFactory.sol` | Deterministic deployer + `deployAndExecuteBatch` wrapper |
-| `evm/src/MockTokenB.sol` | 18-dec ERC20 used as the swap counterparty in flow tests |
+| `evm/src/MockWETH.sol` | 18-dec ERC20 standing in for wrapped ether |
 | `evm/src/MockSwapRouter.sol` | Fixed-rate two-token AMM; seeded with reserves at deploy |
-| `evm/src/MockLendingVault.sol` | Minimal ERC4626-ish vault over bUSDC; shares 1:1, no yield |
+| `evm/src/MockLendingVault.sol` | Minimal ERC4626-ish vault over a single asset; shares 1:1, no yield |
 | `evm/script/DeployIntent.s.sol` | Deploys verifier → impl → factory |
 | `evm/script/DeployMocks.s.sol` | Deploys + seeds the three mock targets |
 | `src/intent-client.ts` | SDK: credential gen, action-hash, proving, submission, typed flow builders |
@@ -282,7 +282,10 @@ yarn evm:deploy:intent    # verifier + impl + factory
 yarn test:intent          # transfer, swap-and-send, vault deposit, vault withdraw, replay-reverts
 ```
 
-The test bridges 100 bUSDC into a fresh intent account and runs all four flows against it — one nullifier per flow, all five assertions green.
+The test runs two sessions:
+
+1. **Credential #1** — bridges 100 bUSDC in, then runs transfer, replay-revert, swap-and-send, bUSDC-vault deposit, bUSDC-vault withdraw.
+2. **Credential #2** — bridges another 100 bUSDC into a fresh intent account and runs a three-tx roundtrip on the same account: tx1 swaps USDC→WETH, tx2 deposits the WETH into the WETH vault, tx3 redeems + swaps back + delivers USDC to the user's EOA in a single atomic batch. Same funds, three proofs, three nullifiers.
 
 ### Caveats
 

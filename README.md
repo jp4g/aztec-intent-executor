@@ -103,6 +103,7 @@ Then `yarn evm:deploy:base-sepolia`, set `EVM_TOKEN_ADDRESS` in `.env.production
 | `evm/src/MockLendingVault.sol` | Minimal ERC4626-ish single-asset vault, shares 1:1, no yield |
 | `src/intent-client.ts` | SDK: credential gen, action-hash, proving, submission, typed flow builders |
 | `src/test-intent.ts` | Headless end-to-end test |
+| `src/test-security.ts` | Security tests: tampered inputs, cross-account replay, re-init attack, duplicate deploy, call-level atomicity |
 | `src/bridge.ts` + `src/server.ts` | Bidirectional bridge: forward (`/api/bridge/initiate`, `/api/bridge/status/:addr`) + reverse (`/api/bridge/evm-to-aztec`, `/api/bridge/evm-to-aztec/status/:id`) |
 
 ### Flow
@@ -167,6 +168,7 @@ The `HonkVerifier` runtime bytecode is ~33.8 KB, over EIP-170. `yarn anvil` pass
 | `yarn evm:build` | `forge build` |
 | `yarn noir:build` | Recompile circuit + regenerate `IntentVerifier.sol` |
 | `yarn test:intent` | Run the headless end-to-end integration test |
+| `yarn test:security` | Run the security / proof-binding regression tests (no bridge needed) |
 | `yarn test:circuit` | Proof pipeline sanity check (no bridge, no anvil) |
 
 ## API (server)

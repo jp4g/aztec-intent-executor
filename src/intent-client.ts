@@ -60,12 +60,51 @@ export const FACTORY_ABI = parseAbi([
   "function predict(bytes32 salt) view returns (address)",
   "function deploy(bytes32 salt) returns (address)",
   "function deployAndExecuteBatch(bytes32 salt, (address target,uint256 value,bytes data)[] calls, bytes32 nullifier, bytes proof) returns (bytes[])",
+  // OZ Clones error surface
+  "error FailedDeployment()",
 ]);
 
 export const ACCOUNT_ABI = parseAbi([
   "function executeBatch((address target,uint256 value,bytes data)[] calls, bytes32 nullifier, bytes proof) returns (bytes[])",
   "function nullified(bytes32) view returns (bool)",
   "function salt() view returns (bytes32)",
+  // IntentAccount error surface — needed so viem can decode reverts
+  "error Replay(bytes32 nullifier)",
+  "error InvalidProof()",
+  "error CallFailed(uint256 index, bytes returnData)",
+  "error EmptyBatch()",
+  // OZ Initializable error surface (for re-init attack test)
+  "error InvalidInitialization()",
+  // HonkVerifier errors — the verifier reverts directly with these rather
+  // than returning false, so IntentAccount's own InvalidProof() wrapper
+  // rarely fires in practice. Included here so viem can decode them in tests.
+  "error ValueGeLimbMax()",
+  "error ValueGeGroupOrder()",
+  "error ValueGeFieldOrder()",
+  "error InvertOfZero()",
+  "error NotPowerOfTwo()",
+  "error ModExpFailed()",
+  "error ProofLengthWrong()",
+  "error ProofLengthWrongWithLogN(uint256 logN, uint256 actualLength, uint256 expectedLength)",
+  "error PublicInputsLengthWrong()",
+  "error SumcheckFailed()",
+  "error ShpleminiFailed()",
+  "error PointAtInfinity()",
+  "error ConsistencyCheckFailed()",
+  "error GeminiChallengeInSubgroup()",
+]);
+
+/** Error names that mean "the verifier rejected the proof for the given public inputs." */
+export const PROOF_REJECTION_ERRORS = new Set([
+  "InvalidProof",
+  "SumcheckFailed",
+  "ShpleminiFailed",
+  "ConsistencyCheckFailed",
+  "PointAtInfinity",
+  "GeminiChallengeInSubgroup",
+  "ProofLengthWrong",
+  "ProofLengthWrongWithLogN",
+  "PublicInputsLengthWrong",
 ]);
 
 const ERC20_ABI = parseAbi([

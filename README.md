@@ -5,6 +5,8 @@ Bi-directional bridge between Aztec (private) and EVM. Send private tokens on Az
 - **Localnet**: Aztec localnet + Anvil (local development)
 - **Production**: Aztec devnet + Base Sepolia (real testnet)
 
+On top of the token bridge, this repo also ships an **intent executor**: bridged bUSDC can be minted directly to a create2'd smart account on EVM whose actions are gated by a Noir proof of knowledge of the account's salt preimage. See [Intent Executor](#intent-executor) below.
+
 ## Architecture
 
 ```
@@ -52,14 +54,14 @@ cd evm && forge install OpenZeppelin/openzeppelin-contracts && forge install fou
 
 ```bash
 # 1. Start Anvil and Aztec Sandbox (separate terminals)
-anvil
-aztec start --sandbox
+yarn anvil                  # anvil --code-size-limit 50000 --silent
+aztec start --local-network # must match the @aztec/* SDK version in package.json
 
-# 2. Deploy canonical protocol contracts (SponsoredFPC etc.) — required on fresh sandbox
-aztec setup-protocol-contracts --node-url http://localhost:8080
-
-# 3. Deploy bUSDC to Anvil
+# 2. Deploy bUSDC to Anvil
 yarn evm:deploy
+
+# 3. (Optional — only needed for the intent executor demo)
+yarn evm:deploy:intent
 
 # 4. Start the bridge server
 yarn server
@@ -67,6 +69,8 @@ yarn server
 # 5. Start the frontend (new terminal)
 yarn dev
 ```
+
+The Aztec CLI (`aztec`) must be the same version as `@aztec/aztec.js` in `package.json` — otherwise the sandbox rejects every SDK-built tx with `Invalid tx: Incorrect verification keys tree root`. At the time of writing both are `4.2.0-aztecnr-rc.2`; `aztec-up -v 4.2.0-aztecnr-rc.2` installs the matching CLI.
 
 Open `http://localhost:5173`.
 
@@ -161,8 +165,12 @@ Open `http://localhost:5173`.
 | `yarn build` | Production webpack build |
 | `yarn evm:deploy` | Deploy bUSDC to Anvil |
 | `yarn evm:deploy:base-sepolia` | Deploy bUSDC to Base Sepolia |
+| `yarn evm:deploy:intent` | Deploy IntentVerifier + IntentAccount impl + factory to Anvil |
+| `yarn evm:deploy:intent:base-sepolia` | Same, against Base Sepolia |
 | `yarn evm:build` | Compile Solidity contracts |
-| `yarn test:bridge` | Run headless integration test |
+| `yarn noir:build` | Compile the intent circuit and regenerate `IntentVerifier.sol` |
+| `yarn test:bridge` | Run headless bridge integration test |
+| `yarn test:intent` | Run headless intent-executor integration test |
 
 ## Project Structure
 
@@ -182,6 +190,9 @@ Open `http://localhost:5173`.
 │   ├── bridge.ts                 # Bridge classes (forward + reverse)
 │   ├── server.ts                 # Express server + API endpoints
 │   └── test-bridge.ts            # Integration test script
+├── circuits/intent/              # Noir circuit for intent proofs
+│   ├── Nargo.toml
+│   └── src/main.nr               # Poseidon2 preimage check + action-hash binding
 ├── .env.localnet                 # Localnet config (Aztec localnet + Anvil)
 ├── .env.production               # Production config (Aztec devnet + Base Sepolia)
 ├── .env.example                  # Template with all variables
@@ -189,3 +200,68 @@ Open `http://localhost:5173`.
 ├── tsconfig.json                 # TypeScript config
 └── package.json                  # Dependencies and scripts
 ```
+
+## Intent Executor
+
+A non-custodial executor layer on top of the token bridge. Bridged bUSDC lands at a create2'd smart account whose actions require a Noir proof of knowledge of the account's salt preimage — no private key, no EOA custody.
+
+### Flow
+
+```
+1. Client generates random preimage, computes salt = Poseidon2(preimage)
+2. Client derives intentAddr = Clones.predictDeterministicAddress(impl, salt, factory)
+3. Client bridges bUSDC from Aztec to intentAddr (unchanged forward bridge)
+4. Client builds (target, value, data, nullifier); computes
+   actionHash = sha256(chainid, intentAddr, target, value, data, nullifier)
+5. Client generates Noir proof with public inputs [salt, actionHashHi, actionHashLo]
+6. Anyone calls factory.deployAndExecute(salt, target, value, data, nullifier, proof)
+   – deploys the EIP-1167 clone if not yet deployed
+   – IntentAccount.execute verifies the proof, re-hashes the action, enforces
+     the nullifier, and runs the call as itself
+```
+
+### Components
+
+| File | Purpose |
+|---|---|
+| `circuits/intent/src/main.nr` | `Poseidon2(preimage) == salt`; `actionHash` bound as public input |
+| `evm/src/IntentVerifier.sol` | UltraHonk verifier generated from the circuit's VK |
+| `evm/src/IntentAccount.sol` | Per-salt EIP-1167 clone with `execute(..., proof)` and nullifier map |
+| `evm/src/IntentAccountFactory.sol` | Deterministic deployer + `deployAndExecute` wrapper |
+| `evm/script/DeployIntent.s.sol` | Forge script that wires verifier → impl → factory |
+| `src/test-intent.ts` | Headless end-to-end test (bridge + prove + execute + replay) |
+
+### Rebuilding the circuit and verifier
+
+```bash
+yarn noir:build
+```
+
+This compiles the circuit with `nargo`, emits the VK with `bb write_vk`, and regenerates `evm/src/IntentVerifier.sol` via `bb write_solidity_verifier`. Then rerun `yarn evm:deploy:intent` to redeploy.
+
+### Versioning
+
+The proving stack must stay aligned or bb.js rejects the witness with `expected msgpack format marker (2 or 3), got 1`:
+
+- `nargo 1.0.0-beta.19` at `$HOME/.nargo/bin/nargo` (`noirup -v 1.0.0-beta.19`). The `noir:build` script pins this path because `$HOME/.aztec/current/bin/nargo` is beta.18.
+- `@noir-lang/noir_js@1.0.0-beta.19`
+- `@aztec/bb.js@4.2.0-aztecnr-rc.2`
+
+The `HonkVerifier` runtime bytecode is ~33.8 KB, which exceeds EIP-170. The `yarn anvil` script passes `--code-size-limit 50000` and the `evm:deploy:intent*` scripts pass `--disable-code-size-limit` so forge will broadcast it. Base Sepolia accepts contracts over 24 KB without extra flags.
+
+### Running the integration test
+
+With Anvil, the Aztec sandbox, and the bridge server running:
+
+```bash
+yarn evm:deploy           # bUSDC
+yarn evm:deploy:intent    # verifier + impl + factory
+yarn test:intent          # bridge 100 bUSDC, prove two distinct actions, assert replay reverts
+```
+
+### Caveats
+
+- The circuit's `verifier` is immutable per intent account (set at init); evolving the circuit strands old accounts on old verifier bytecode. Fine for a demo; flag for prod.
+- Nullifier is a user-chosen `bytes32`. Reuse reverts, so losing track of used nullifiers just wastes a tx — funds stay recoverable. Losing the preimage permanently locks the account.
+- First use of an intent account is typically `approve` then `transfer` — two actions, two proofs. A batched `execute[]` would save a tx; not implemented.
+

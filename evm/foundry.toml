@@ -3,5 +3,8 @@ src = "src"
 out = "out"
 libs = ["lib"]
 
-# Allow writing deployment info to parent directory
+# Allow writing deployment info to parent directory; also enable FFI so
+# tests can shell out to `tsx src/gen-fixture.ts` to produce real Noir
+# proofs (cached under evm/test/fixtures/cache/).
 fs_permissions = [{ access = "read-write", path = "../" }]
+ffi = true

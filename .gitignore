@@ -12,6 +12,7 @@ deployment.json
 intent-deployment.json
 mocks-deployment.json
 circuits/intent/target/
+evm/test/fixtures/cache/
 
 pxe_data_*
 wallet_data_*

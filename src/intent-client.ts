@@ -56,7 +56,7 @@ export type BatchBackend = {
 // ABI fragments (just what the client submits / predicts)
 // ---------------------------------------------------------------------------
 
-export const FACTORY_ABI = parseAbi([
+const FACTORY_ABI = parseAbi([
   "function predict(bytes32 salt) view returns (address)",
   "function deploy(bytes32 salt) returns (address)",
   "function deployAndExecuteBatch(bytes32 salt, (address target,uint256 value,bytes data)[] calls, bytes32 nullifier, bytes proof) returns (bytes[])",
@@ -94,18 +94,6 @@ export const ACCOUNT_ABI = parseAbi([
   "error GeminiChallengeInSubgroup()",
 ]);
 
-/** Error names that mean "the verifier rejected the proof for the given public inputs." */
-export const PROOF_REJECTION_ERRORS = new Set([
-  "InvalidProof",
-  "SumcheckFailed",
-  "ShpleminiFailed",
-  "ConsistencyCheckFailed",
-  "PointAtInfinity",
-  "GeminiChallengeInSubgroup",
-  "ProofLengthWrong",
-  "ProofLengthWrongWithLogN",
-  "PublicInputsLengthWrong",
-]);
 
 const ERC20_ABI = parseAbi([
   "function approve(address,uint256) returns (bool)",

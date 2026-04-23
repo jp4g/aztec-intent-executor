@@ -14,14 +14,13 @@
  * so repeated `forge test` runs skip the slow Noir/bb.js pipeline.
  */
 
-// IMPORTANT: silence all console.* output to stdout *before* importing bb.js
-// or noir_js, because they log "Generated proof for circuit..." and similar
-// messages that would otherwise concatenate onto the proof hex when forge
-// reads our stdout via vm.ffi. Redirect those to stderr so humans can still
-// see them when running the script by hand.
-const _origWrite = process.stdout.write.bind(process.stdout);
+// IMPORTANT: redirect console.* to stderr *before* importing bb.js / noir_js.
+// Both libraries log progress lines ("Generated proof for circuit with 3
+// public inputs and 166 fields.") to stdout via console.log. That output
+// would get concatenated onto our proof hex and vm.ffi would read the wrong
+// byte length. Patching the console doesn't touch process.stdout, so our
+// own `process.stdout.write(hex)` calls below still reach the right stream.
 for (const m of ["log", "info", "debug", "warn"] as const) {
-  const orig = console[m];
   console[m] = (...args: unknown[]) => process.stderr.write(args.map(String).join(" ") + "\n");
 }
 
@@ -72,7 +71,7 @@ async function main() {
 
   if (existsSync(cachePath)) {
     const cached = readFileSync(cachePath, "utf8").trim();
-    _origWrite(cached);
+    process.stdout.write(cached);
     return;
   }
 
@@ -93,7 +92,7 @@ async function main() {
 
     mkdirSync(dirname(cachePath), { recursive: true });
     writeFileSync(cachePath, hex);
-    _origWrite(hex);
+    process.stdout.write(hex);
   } finally {
     await bb.destroy();
   }

@@ -33,10 +33,11 @@ contract MockSwapRouter {
     error PairUnsupported();
     error InsufficientOutput();
     error InsufficientReserve();
+    error ZeroDenominator();
 
     /// @dev Unrestricted for the demo; anyone can seed a rate or top up reserves.
     function setRate(address tokenIn, address tokenOut, uint256 numerator, uint256 denominator) external {
-        require(denominator > 0, "denom=0");
+        if (denominator == 0) revert ZeroDenominator();
         rates[_key(tokenIn, tokenOut)] = Rate(numerator, denominator);
         emit RateSet(tokenIn, tokenOut, numerator, denominator);
     }

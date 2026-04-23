@@ -117,25 +117,21 @@ export class EvmToAztecBridge {
     };
   }
 
+  /// Throws on RPC failure — the caller's poll loop logs and skips this tick,
+  /// so lastKnownBalance stays at its last good value and we retry next tick.
   private async getEvmBalance(): Promise<bigint> {
     const chain = await getViemChain();
     const publicClient = createPublicClient({
       chain,
       transport: http(this.evmRpcUrl),
     });
-
-    try {
-      const balance = await publicClient.readContract({
-        address: this.evmTokenAddress,
-        abi: BRIDGED_USDC_ABI,
-        functionName: "balanceOf",
-        args: [this.bridgeWalletAddress],
-      });
-      return balance as bigint;
-    } catch (error) {
-      console.error("[ReverseBridge] Error reading EVM balance:", error);
-      return this.lastKnownBalance;
-    }
+    const balance = await publicClient.readContract({
+      address: this.evmTokenAddress,
+      abi: BRIDGED_USDC_ABI,
+      functionName: "balanceOf",
+      args: [this.bridgeWalletAddress],
+    });
+    return balance as bigint;
   }
 
   private async pollEvmBalance() {

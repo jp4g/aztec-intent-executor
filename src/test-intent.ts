@@ -1,26 +1,14 @@
 /**
- * Intent Executor Integration Test
+ * End-to-end integration test for the intent executor.
  *
- * Exercises the full non-custodial intent flow plus composed action flows
- * built on top of executeBatch:
+ * Runs two sessions against a live anvil + Aztec sandbox + bridge server:
+ *   1. primitives on one intent account (transfer, replay-revert, swap,
+ *      bUSDC-vault deposit/withdraw)
+ *   2. full privacy roundtrip on a fresh intent account — Aztec -> EVM ->
+ *      swap -> lend -> unwind -> reverse bridge -> Aztec, three nullifiers
+ *      one reusable account
  *
- *   A.  transfer         — one call
- *   A'. replay negative  — reuses consumed nullifier
- *   B.  swap-and-send    — approve + swap (two calls)
- *   C.  vault deposit    — approve + deposit into bUSDC vault (two calls)
- *   D.  vault withdraw   — redeem from bUSDC vault (one call)
- *   E.  roundtrip        — THREE separate batches on a fresh intent account:
- *       tx1: approve + swap (USDC -> WETH, kept in the intent account)
- *       tx2: approve + deposit into WETH vault
- *       tx3: redeem + approve + swap (WETH -> USDC, recipient = user EOA)
- *       — demonstrates that the account is reusable across sessions with
- *         multiple nullifiers, and that outputs can be routed anywhere.
- *
- * Prereqs (see README §Intent Executor):
- *   - anvil on :8545, aztec sandbox on :8080, bridge server on :3001
- *   - yarn evm:deploy          (bUSDC)
- *   - yarn evm:deploy:mocks    (MockWETH, MockSwapRouter, two MockLendingVault)
- *   - yarn evm:deploy:intent   (HonkVerifier, IntentAccount impl, factory)
+ * Prereqs + invocation: see README.
  */
 
 import { readFileSync } from "node:fs";

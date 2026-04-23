@@ -71,7 +71,6 @@ export class EvmToAztecBridge {
     console.log("[ReverseBridge] Starting EVM -> Aztec bridge service...");
     console.log(`[ReverseBridge] Bridge wallet (EVM): ${this.bridgeWalletAddress}`);
 
-    // Initialize lastKnownBalance
     this.lastKnownBalance = await this.getEvmBalance();
     console.log(`[ReverseBridge] Initial bridge wallet bUSDC balance: ${this.lastKnownBalance}`);
 
@@ -121,10 +120,7 @@ export class EvmToAztecBridge {
   /// so lastKnownBalance stays at its last good value and we retry next tick.
   private async getEvmBalance(): Promise<bigint> {
     const chain = await getViemChain();
-    const publicClient = createPublicClient({
-      chain,
-      transport: http(this.evmRpcUrl),
-    });
+    const publicClient = createPublicClient({ chain, transport: http(this.evmRpcUrl) });
     const balance = await publicClient.readContract({
       address: this.evmTokenAddress,
       abi: BRIDGED_USDC_ABI,
@@ -382,24 +378,12 @@ export class AztecToEvmBridge {
   }
 
   private async mintOnEvm(to: string, amount: bigint) {
-    console.log(`[Bridge] mintOnEvm called - to: ${to}, amount: ${amount}`);
-
-    const account = privateKeyToAccount(this.evmPrivateKey);
-    console.log(`[Bridge] Minter account: ${account.address}`);
+    console.log(`[Bridge] Minting ${amount} bUSDC to ${to}...`);
 
     const chain = await getViemChain();
-    const publicClient = createPublicClient({
-      chain,
-      transport: http(this.evmRpcUrl),
-    });
-
-    const walletClient = createWalletClient({
-      account,
-      chain,
-      transport: http(this.evmRpcUrl),
-    });
-
-    console.log(`[Bridge] Sending mint transaction...`);
+    const account = privateKeyToAccount(this.evmPrivateKey);
+    const publicClient = createPublicClient({ chain, transport: http(this.evmRpcUrl) });
+    const walletClient = createWalletClient({ account, chain, transport: http(this.evmRpcUrl) });
 
     const hash = await walletClient.writeContract({
       address: this.evmTokenAddress,
@@ -407,11 +391,8 @@ export class AztecToEvmBridge {
       functionName: "mint",
       args: [to as `0x${string}`, amount],
     });
-
-    console.log(`[Bridge] EVM mint tx submitted: ${hash}`);
-
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    console.log(`[Bridge] EVM mint confirmed - status: ${receipt.status}, block: ${receipt.blockNumber}`);
+    console.log(`[Bridge] EVM mint ${hash} confirmed (block ${receipt.blockNumber}, status ${receipt.status})`);
   }
 
   getActiveSessionsCount(): number {

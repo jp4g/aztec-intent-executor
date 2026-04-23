@@ -101,46 +101,4 @@ export async function mintTokensPrivate(
     .send({ from, ...(paymentMethod ? { fee: { paymentMethod } } : {}) });
 }
 
-/**
- * Mint tokens to an address (public balance)
- */
-export async function mintTokensPublic(
-  token: TokenContract,
-  from: AztecAddress,
-  to: AztecAddress,
-  amount: bigint,
-  fpcAddress?: string
-): Promise<void> {
-  const paymentMethod = await getSponsoredPaymentMethod(fpcAddress);
-  await token.methods.mint_to_public(to, amount)
-    .send({ from, ...(paymentMethod ? { fee: { paymentMethod } } : {}) });
-}
-
-/**
- * Get private balance of an address
- */
-export async function getPrivateBalance(
-  token: TokenContract,
-  address: AztecAddress,
-  from: AztecAddress
-): Promise<bigint> {
-  const { result } = await token.methods.balance_of_private(address).simulate({ from });
-  return result;
-}
-
-/**
- * Transfer tokens privately from one address to another
- */
-export async function transferPrivate(
-  token: TokenContract,
-  from: AztecAddress,
-  to: AztecAddress,
-  amount: bigint,
-  fpcAddress?: string
-): Promise<void> {
-  const paymentMethod = await getSponsoredPaymentMethod(fpcAddress);
-  await token.methods.transfer_private_to_private(from, to, amount, 0n)
-    .send({ from, ...(paymentMethod ? { fee: { paymentMethod } } : {}) });
-}
-
 export { Fr, AztecAddress, EmbeddedWallet, TokenContract };

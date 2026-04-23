@@ -3,8 +3,16 @@ src = "src"
 out = "out"
 libs = ["lib"]
 
-# Allow writing deployment info to parent directory; also enable FFI so
-# tests can shell out to `tsx src/gen-fixture.ts` to produce real Noir
-# proofs (cached under evm/test/fixtures/cache/).
-fs_permissions = [{ access = "read-write", path = "../" }]
+# FFI is enabled so test/IntentAccount.t.sol can shell out to
+# `tsx src/gen-fixture.ts` for real Noir proofs (cached under
+# evm/test/fixtures/cache/, which the script owns via node's fs — NOT
+# via forge's vm.readFile, so no permission is needed here).
+#
+# fs_permissions is scoped narrowly to just the three JSON deployment
+# files that Deploy*.s.sol read/write at the repo root.
+fs_permissions = [
+    { access = "read-write", path = "../evm-deployment.json" },
+    { access = "read-write", path = "../intent-deployment.json" },
+    { access = "read-write", path = "../mocks-deployment.json" },
+]
 ffi = true

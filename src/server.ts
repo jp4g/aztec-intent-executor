@@ -179,103 +179,104 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Initiate an Aztec -> EVM bridge session (anyone can target any EVM address,
-// including a counterfactual IntentAccount).
-app.post("/api/bridge/initiate", async (req, res) => {
-  if (!isInitialized) return res.status(503).json({ error: "Server is still initializing, please wait..." });
-  if (!bridge) return res.status(503).json({ error: "Bridge is not enabled. Set EVM_TOKEN_ADDRESS env var." });
+// ---- Endpoint plumbing --------------------------------------------------
+// Each endpoint guards on (a) server initialization finished, and some on
+// (b) a specific bridge being enabled. `withGuards` centralizes those 503s
+// plus the try/catch -> 500 json shape that every handler would otherwise
+// repeat.
 
-  try {
-    const { evmAddress, senderAddress } = req.body;
-    if (!evmAddress) return res.status(400).json({ error: "evmAddress is required" });
-    if (!/^0x[a-fA-F0-9]{40}$/.test(evmAddress)) {
-      return res.status(400).json({ error: "Invalid EVM address format" });
+type Guard = () => { status: number; error: string } | null;
+
+const requireInit: Guard = () =>
+  isInitialized ? null : { status: 503, error: "Server is still initializing, please wait..." };
+const requireBridge: Guard = () =>
+  bridge ? null : { status: 503, error: "Bridge is not enabled. Set EVM_TOKEN_ADDRESS env var." };
+const requireReverseBridge: Guard = () =>
+  reverseBridge ? null : { status: 503, error: "Reverse bridge is not enabled. Set EVM_TOKEN_ADDRESS env var." };
+
+function withGuards(
+  guards: Guard[],
+  handler: (req: express.Request, res: express.Response) => void | Promise<void>,
+): express.RequestHandler {
+  return async (req, res) => {
+    for (const g of guards) {
+      const err = g();
+      if (err) { res.status(err.status).json({ error: err.error }); return; }
     }
-    if (!senderAddress) {
-      console.warn(`[Bridge] WARNING: No senderAddress provided - note discovery may fail!`);
+    try {
+      await handler(req, res);
+    } catch (error) {
+      console.error(`[${req.method} ${req.path}]`, error);
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: message });
     }
+  };
+}
 
-    console.log(`[Bridge] Initiating bridge for EVM address ${evmAddress}`);
-    const session = await bridge.createSession(evmAddress, senderAddress);
+// ---- Endpoints ---------------------------------------------------------
 
-    res.json({
-      success: true,
-      aztecDepositAddress: session.aztecAddress,
-      expiresAt: session.expiresAt,
-      message: "Send private USDC to the Aztec address within 5 minutes to bridge to EVM",
-    });
-  } catch (error) {
-    console.error("Error initiating bridge:", error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    res.status(500).json({ error: `Failed to initiate bridge: ${errorMessage}` });
+// Open a forward bridge session targeting any EVM address (typically a
+// counterfactual IntentAccount).
+app.post("/api/bridge/initiate", withGuards([requireInit, requireBridge], async (req, res) => {
+  const { evmAddress, senderAddress } = req.body;
+  if (!evmAddress) { res.status(400).json({ error: "evmAddress is required" }); return; }
+  if (!/^0x[a-fA-F0-9]{40}$/.test(evmAddress)) {
+    res.status(400).json({ error: "Invalid EVM address format" }); return;
   }
-});
+  if (!senderAddress) {
+    console.warn(`[Bridge] WARNING: No senderAddress provided - note discovery may fail!`);
+  }
+  console.log(`[Bridge] Initiating bridge for EVM address ${evmAddress}`);
+  const session = await bridge!.createSession(evmAddress, senderAddress);
+  res.json({
+    success: true,
+    aztecDepositAddress: session.aztecAddress,
+    expiresAt: session.expiresAt,
+    message: "Send private USDC to the Aztec address within 5 minutes to bridge to EVM",
+  });
+}));
 
-// Poll status for a bridge session by its Aztec deposit address.
-app.get("/api/bridge/status/:aztecAddress", (req, res) => {
-  if (!bridge) return res.status(503).json({ error: "Bridge is not enabled" });
-
-  const { aztecAddress } = req.params;
-  const session = bridge.getSession(aztecAddress);
-
+// Poll a forward session by its Aztec deposit address.
+app.get("/api/bridge/status/:aztecAddress", withGuards([requireBridge], (req, res) => {
+  const session = bridge!.getSession(req.params.aztecAddress as string);
   if (!session) {
-    return res.json({ status: "not_found", message: "Session not found or expired" });
+    res.json({ status: "not_found", message: "Session not found or expired" }); return;
   }
-
   const now = Date.now();
   if (now > session.expiresAt) {
-    return res.json({ status: "expired", message: "Session expired without receiving payment" });
+    res.json({ status: "expired", message: "Session expired without receiving payment" }); return;
   }
-
   res.json({
     status: "pending",
     evmAddress: session.evmAddress,
     expiresAt: session.expiresAt,
     remainingTime: Math.max(0, session.expiresAt - now),
   });
-});
+}));
 
-// Initiate an EVM -> Aztec reverse bridge session. User sends `amount` bUSDC
-// to the deposit address; once detected, the server mints private USDC on
-// Aztec to `aztecAddress`. Used when the intent executor wants to send
-// proceeds back to Aztec for privacy.
-app.post("/api/bridge/evm-to-aztec", async (req, res) => {
-  if (!isInitialized) return res.status(503).json({ error: "Server is still initializing, please wait..." });
-  if (!reverseBridge) return res.status(503).json({ error: "Reverse bridge is not enabled. Set EVM_TOKEN_ADDRESS env var." });
+// Open a reverse bridge session. Server mints private USDC on Aztec to
+// `aztecAddress` once its bridge wallet receives the matching `amount`.
+app.post("/api/bridge/evm-to-aztec", withGuards([requireInit, requireReverseBridge], async (req, res) => {
+  const { aztecAddress, amount } = req.body;
+  if (!aztecAddress || !amount) { res.status(400).json({ error: "aztecAddress and amount are required" }); return; }
+  const amountBigInt = BigInt(amount);
+  console.log(`[ReverseBridge] Initiating bridge for Aztec address ${aztecAddress}, amount: ${amountBigInt}`);
+  const session = reverseBridge!.createSession(aztecAddress, amountBigInt);
+  res.json({
+    success: true,
+    sessionId: session.sessionId,
+    depositAddress: session.depositAddress,
+    expiresAt: session.expiresAt,
+    message: `Send ${amountBigInt} bUSDC to ${session.depositAddress} within 5 minutes`,
+  });
+}));
 
-  try {
-    const { aztecAddress, amount } = req.body;
-    if (!aztecAddress || !amount) return res.status(400).json({ error: "aztecAddress and amount are required" });
-
-    const amountBigInt = BigInt(amount);
-    console.log(`[ReverseBridge] Initiating bridge for Aztec address ${aztecAddress}, amount: ${amountBigInt}`);
-    const session = reverseBridge.createSession(aztecAddress, amountBigInt);
-
-    res.json({
-      success: true,
-      sessionId: session.sessionId,
-      depositAddress: session.depositAddress,
-      expiresAt: session.expiresAt,
-      message: `Send ${amountBigInt} bUSDC to ${session.depositAddress} within 5 minutes`,
-    });
-  } catch (error) {
-    console.error("Error initiating reverse bridge:", error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    res.status(500).json({ error: `Failed to initiate reverse bridge: ${errorMessage}` });
-  }
-});
-
-// Poll status for a reverse bridge session by its session ID.
-app.get("/api/bridge/evm-to-aztec/status/:sessionId", (req, res) => {
-  if (!reverseBridge) return res.status(503).json({ error: "Reverse bridge is not enabled" });
-
-  const { sessionId } = req.params;
-  const session = reverseBridge.getSession(sessionId);
-
+// Poll a reverse session by its session id.
+app.get("/api/bridge/evm-to-aztec/status/:sessionId", withGuards([requireReverseBridge], (req, res) => {
+  const session = reverseBridge!.getSession(req.params.sessionId as string);
   if (!session) {
-    return res.json({ status: "not_found", message: "Session not found or expired" });
+    res.json({ status: "not_found", message: "Session not found or expired" }); return;
   }
-
   res.json({
     status: session.status,
     aztecAddress: session.aztecAddress.toString(),
@@ -283,32 +284,21 @@ app.get("/api/bridge/evm-to-aztec/status/:sessionId", (req, res) => {
     expiresAt: session.expiresAt,
     remainingTime: Math.max(0, session.expiresAt - Date.now()),
   });
-});
+}));
 
 // Test helper — mint private USDC directly to an Aztec address. Used by
-// test-intent.ts to populate a bridge deposit address; not a user-facing API.
-app.post("/api/test/transfer-private", async (req, res) => {
-  if (!isInitialized) return res.status(503).json({ error: "Server is still initializing, please wait..." });
-
-  try {
-    const { to, amount } = req.body;
-    if (!to || !amount) return res.status(400).json({ error: "to and amount are required" });
-
-    const recipient = AztecAddress.fromString(to);
-    const transferAmount = BigInt(amount);
-
-    console.log(`[Test] Transferring ${transferAmount} USDC privately to ${to}...`);
-    const { mintTokensPrivate } = await import("./utils.js");
-    await mintTokensPrivate(token, minterAddress, recipient, transferAmount, activeFpcAddress);
-    console.log(`[Test] Private transfer complete to ${to}`);
-
-    res.json({ success: true, amount: amount.toString(), to });
-  } catch (error) {
-    console.error("Error in test transfer:", error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    res.status(500).json({ error: `Failed to transfer: ${errorMessage}` });
-  }
-});
+// test-intent.ts to populate a bridge deposit address; not user-facing.
+app.post("/api/test/transfer-private", withGuards([requireInit], async (req, res) => {
+  const { to, amount } = req.body;
+  if (!to || !amount) { res.status(400).json({ error: "to and amount are required" }); return; }
+  const recipient = AztecAddress.fromString(to);
+  const transferAmount = BigInt(amount);
+  console.log(`[Test] Transferring ${transferAmount} USDC privately to ${to}...`);
+  const { mintTokensPrivate } = await import("./utils.js");
+  await mintTokensPrivate(token, minterAddress, recipient, transferAmount, activeFpcAddress);
+  console.log(`[Test] Private transfer complete to ${to}`);
+  res.json({ success: true, amount: amount.toString(), to });
+}));
 
 // Health check — exposes the Aztec token, EVM token, and bridge state that
 // test-intent.ts reads on startup.

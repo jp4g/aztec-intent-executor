@@ -42,6 +42,7 @@ import {
   type Credential,
   type BatchBackend,
 } from "./intent-client.js";
+import { BridgeClient } from "./bridge-client.js";
 
 const SERVER_URL = "http://localhost:3001";
 const EVM_RPC_URL = "http://localhost:8545";
@@ -70,74 +71,13 @@ interface MocksDeployment {
   wethVault: Hex;
 }
 
-interface Health {
-  evmTokenAddress: Hex;
-  bridgeEnabled: boolean;
-  reverseBridgeEnabled: boolean;
-  reverseBridgeDepositAddress: Hex | null;
-  minterAddress: string | null;
-}
-
 function section(title: string) {
   console.log(`\n${"=".repeat(60)}\n  ${title}\n${"=".repeat(60)}`);
 }
 
-function log(msg: string, data?: unknown) {
+function log(msg: string) {
   const ts = new Date().toISOString().split("T")[1].split(".")[0];
-  if (data !== undefined) console.log(`[${ts}] ${msg}`, data);
-  else console.log(`[${ts}] ${msg}`);
-}
-
-async function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function getHealth(): Promise<Health> {
-  const res = await fetch(`${SERVER_URL}/api/health`);
-  const data = await res.json();
-  if (data.status !== "ok") throw new Error("Server not ready");
-  if (!data.bridgeEnabled) throw new Error("Forward bridge not enabled on server");
-  if (!data.reverseBridgeEnabled) throw new Error("Reverse bridge not enabled on server");
-  return {
-    evmTokenAddress: data.evmTokenAddress,
-    bridgeEnabled: data.bridgeEnabled,
-    reverseBridgeEnabled: data.reverseBridgeEnabled,
-    reverseBridgeDepositAddress: data.reverseBridgeDepositAddress,
-    minterAddress: data.minterAddress,
-  };
-}
-
-async function initiateReverseBridge(params: {
-  aztecAddress: string;
-  amount: bigint;
-}): Promise<{ sessionId: string; depositAddress: Hex }> {
-  const res = await fetch(`${SERVER_URL}/api/bridge/evm-to-aztec`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ aztecAddress: params.aztecAddress, amount: params.amount.toString() }),
-  });
-  const data = await res.json();
-  if (!data.success) throw new Error(`reverse bridge initiate failed: ${JSON.stringify(data)}`);
-  return { sessionId: data.sessionId, depositAddress: data.depositAddress };
-}
-
-async function pollReverseBridgeUntilCompleted(sessionId: string, timeoutMs = 90_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastStatus = "unknown";
-  while (Date.now() < deadline) {
-    const res = await fetch(`${SERVER_URL}/api/bridge/evm-to-aztec/status/${sessionId}`);
-    const data = await res.json();
-    if (data.status !== lastStatus) {
-      log(`reverse bridge session ${sessionId}: ${data.status}`);
-      lastStatus = data.status;
-    }
-    if (data.status === "completed") return;
-    if (data.status === "expired" || data.status === "not_found") {
-      throw new Error(`reverse bridge session ${sessionId} ended as ${data.status}`);
-    }
-    await sleep(2000);
-  }
-  throw new Error(`reverse bridge session ${sessionId} timed out in status "${lastStatus}"`);
+  console.log(`[${ts}] ${msg}`);
 }
 
 function readIntentDeployment(): IntentDeployment {
@@ -155,41 +95,6 @@ async function balanceOf(pc: PublicClient, token: Hex, owner: Hex): Promise<bigi
     functionName: "balanceOf",
     args: [owner],
   })) as bigint;
-}
-
-async function bridgeBusdcToAddress(evmAddress: Hex, amountMicro: bigint): Promise<void> {
-  log(`Initiating bridge session targeting ${evmAddress}...`);
-  const initRes = await fetch(`${SERVER_URL}/api/bridge/initiate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ evmAddress }),
-  });
-  const initData = await initRes.json();
-  if (!initData.success) throw new Error(`initiate failed: ${JSON.stringify(initData)}`);
-  const depositAddr = initData.aztecDepositAddress as string;
-  log(`Bridge deposit address: ${depositAddr}`);
-
-  log(`Minting ${amountMicro} USDC privately to deposit address...`);
-  const transferRes = await fetch(`${SERVER_URL}/api/test/transfer-private`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ to: depositAddr, amount: amountMicro.toString() }),
-  });
-  const transferData = await transferRes.json();
-  if (!transferData.success) throw new Error(`transfer-private failed: ${JSON.stringify(transferData)}`);
-
-  log("Waiting for bridge to detect deposit and mint bUSDC on EVM...");
-  const deadline = Date.now() + 90_000;
-  while (Date.now() < deadline) {
-    const statusRes = await fetch(`${SERVER_URL}/api/bridge/status/${depositAddr}`);
-    const statusData = await statusRes.json();
-    if (statusData.status === "not_found") {
-      log("Bridge session completed.");
-      return;
-    }
-    await sleep(3000);
-  }
-  throw new Error("Bridge did not complete within timeout");
 }
 
 /** Build proof → submit → wait for receipt. */
@@ -230,7 +135,8 @@ async function runBatch(params: {
 async function main() {
   section("INTENT EXECUTOR INTEGRATION TEST");
 
-  const health = await getHealth();
+  const bridge = new BridgeClient(SERVER_URL);
+  const health = await bridge.health();
   const intentD = readIntentDeployment();
   const mocks = readMocksDeployment();
   log(`bUSDC:                ${health.evmTokenAddress}`);
@@ -260,7 +166,11 @@ async function main() {
 
   section("Bridge bUSDC from Aztec to intent #1");
   const bridgeAmount = parseUnits(BRIDGE_AMOUNT_USDC.toString(), 6);
-  await bridgeBusdcToAddress(cred1.intentAddress, bridgeAmount);
+  await bridge.bridgeToEvm({
+    evmAddress: cred1.intentAddress,
+    amountMicro: bridgeAmount,
+    onProgress: log,
+  });
   const intentBal0 = await balanceOf(publicClient, health.evmTokenAddress, cred1.intentAddress);
   log(`intent bUSDC after bridge: ${formatUnits(intentBal0, 6)}`);
   if (intentBal0 !== bridgeAmount) throw new Error(`bridge produced ${intentBal0}, expected ${bridgeAmount}`);
@@ -429,7 +339,11 @@ async function main() {
   const bridgeWalletUsdcBefore = await balanceOf(publicClient, health.evmTokenAddress, reverseBridgeWallet);
 
   section("E. Bridge 100 bUSDC to intent #2");
-  await bridgeBusdcToAddress(cred2.intentAddress, bridgeAmount);
+  await bridge.bridgeToEvm({
+    evmAddress: cred2.intentAddress,
+    amountMicro: bridgeAmount,
+    onProgress: log,
+  });
   const e0IntentUsdc = await balanceOf(publicClient, health.evmTokenAddress, cred2.intentAddress);
   log(`intent bUSDC after bridge: ${formatUnits(e0IntentUsdc, 6)}`);
   if (e0IntentUsdc !== bridgeAmount) throw new Error("bridge delta wrong for roundtrip");
@@ -497,10 +411,7 @@ async function main() {
   const nE3 = ("0x" + "00".repeat(31) + "e3") as Hex;
 
   log(`Creating reverse-bridge session for ${formatUnits(bridgeAmount, 6)} bUSDC -> ${health.minterAddress}`);
-  const reverseSession = await initiateReverseBridge({
-    aztecAddress: health.minterAddress,
-    amount: bridgeAmount,
-  });
+  const reverseSession = await bridge.initiateReverse(health.minterAddress, bridgeAmount);
   log(`reverse bridge sessionId: ${reverseSession.sessionId}`);
   if (reverseSession.depositAddress.toLowerCase() !== reverseBridgeWallet.toLowerCase()) {
     throw new Error(`reverse bridge deposit address mismatch: ${reverseSession.depositAddress} vs ${reverseBridgeWallet}`);
@@ -547,7 +458,7 @@ async function main() {
   log(`✓ reverse-bridge wallet received ${formatUnits(bridgeDelta, 6)} bUSDC (awaiting Aztec mint)`);
 
   section("E.tx3' — wait for reverse bridge to mint private USDC on Aztec");
-  await pollReverseBridgeUntilCompleted(reverseSession.sessionId);
+  await bridge.waitForReverseBridge(reverseSession.sessionId, { onProgress: log });
   log(`✓ reverse bridge completed — ${formatUnits(bridgeAmount, 6)} private USDC minted on Aztec to ${health.minterAddress}`);
 
   section("ALL INTENT FLOW TESTS PASSED");

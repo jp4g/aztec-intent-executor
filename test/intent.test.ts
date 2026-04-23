@@ -41,8 +41,8 @@ import {
   type Call,
   type Credential,
   type BatchBackend,
-} from "./intent-client.js";
-import { BridgeClient } from "./bridge-client.js";
+} from "../src/intent-client.js";
+import { BridgeClient } from "../src/bridge-client.js";
 
 const SERVER_URL = "http://localhost:3001";
 const EVM_RPC_URL = "http://localhost:8545";

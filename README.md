@@ -102,10 +102,10 @@ Then `yarn evm:deploy:base-sepolia`, set `EVM_TOKEN_ADDRESS` in `.env.production
 | `src/intent-client.ts` | Client SDK — credential gen, action-hash, proving, submission, typed flow builders |
 | `src/bridge.ts` | `AztecToEvmBridge` (forward, session-per-deposit) + `EvmToAztecBridge` (reverse, amount-matched sessions) |
 | `src/server.ts` | Express server exposing the 6 bridge / test endpoints |
-| `src/test-intent.ts` | Headless end-to-end test (uses the live bridge + Aztec sandbox) |
+| `test/intent.test.ts` | Headless end-to-end test (uses the live bridge + Aztec sandbox) |
 | `evm/test/IntentAccount.t.sol` | Forge test — 11 security cases. Real proofs via `vm.ffi` into `src/gen-fixture.ts`, cached on disk |
 | `src/gen-fixture.ts` | CLI that generates + caches a Noir proof for a given `(preimage, salt, action_hash_hi, action_hash_lo)` |
-| `src/test-circuit.ts` | Proof-pipeline sanity check — no bridge, no anvil, no forge |
+| `test/circuit.test.ts` | Proof-pipeline sanity check — no bridge, no anvil, no forge |
 
 ### Flow (one batch)
 
@@ -182,11 +182,11 @@ Observation worth knowing: real-world bad-proof reverts fire as **`SumcheckFaile
 
 ### End-to-end (`yarn test:intent`)
 
-`src/test-intent.ts` — runs against the live anvil + Aztec sandbox + bridge server. Exercises everything including the real Aztec↔EVM bridging. ~50 s start to finish. See "Localnet quickstart" above for the scenarios covered.
+`test/intent.test.ts` — runs against the live anvil + Aztec sandbox + bridge server. Exercises everything including the real Aztec↔EVM bridging. ~50 s start to finish. See "Localnet quickstart" above for the scenarios covered.
 
 ### Proof pipeline sanity (`yarn test:circuit`)
 
-`src/test-circuit.ts` — no bridge, no anvil. Just: generate a preimage, compute salt, generate a witness, run the prover, verify off-chain. Quickest smoke check that `nargo` + `noir_js` + `bb.js` are aligned.
+`test/circuit.test.ts` — no bridge, no anvil. Just: generate a preimage, compute salt, generate a witness, run the prover, verify off-chain. Quickest smoke check that `nargo` + `noir_js` + `bb.js` are aligned.
 
 ## API (server)
 
@@ -197,7 +197,7 @@ Observation worth knowing: real-world bad-proof reverts fire as **`SumcheckFaile
 | `/api/bridge/status/:aztecAddress` | GET | Poll a forward session by its Aztec deposit address |
 | `/api/bridge/evm-to-aztec` | POST | Open an EVM→Aztec reverse session — mints private USDC to a specified Aztec address once the bridge wallet receives the amount |
 | `/api/bridge/evm-to-aztec/status/:sessionId` | GET | Poll a reverse session by its session id |
-| `/api/test/transfer-private` | POST | Test helper — server-side private mint of USDC directly to an Aztec address. Used by `test-intent.ts` to populate deposit addresses; not a user-facing API |
+| `/api/test/transfer-private` | POST | Test helper — server-side private mint of USDC directly to an Aztec address. Used by `test/intent.test.ts` to populate deposit addresses; not a user-facing API |
 
 ## Environment variables
 
@@ -291,9 +291,11 @@ Whoever runs the server can trivially correlate `userAztec → intentAddr` on th
 │   ├── bridge.ts                         # forward + reverse bridge classes
 │   ├── server.ts                         # Express server (6 endpoints)
 │   ├── intent-client.ts                  # SDK: credential, proving, submission, flow builders
-│   ├── gen-fixture.ts                    # CLI used by forge vm.ffi for real proofs
-│   ├── test-intent.ts                    # end-to-end test (uses live bridge)
-│   └── test-circuit.ts                   # proof pipeline sanity
+│   ├── bridge-client.ts                  # typed HTTP client for the bridge server
+│   └── gen-fixture.ts                    # CLI used by forge vm.ffi for real proofs
+├── test/
+│   ├── intent.test.ts                    # end-to-end test (uses live bridge)
+│   └── circuit.test.ts                   # proof pipeline sanity
 ├── .env.localnet / .env.production / .env.example
 ├── tsconfig.json
 └── package.json
